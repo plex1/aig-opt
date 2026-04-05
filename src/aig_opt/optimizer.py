@@ -217,12 +217,24 @@ def simple_rewrite(aig: AIG) -> AIG:
     return aig
 
 
+def dag_rewrite_pass(aig: AIG) -> AIG:
+    """DAG-aware rewriting pass (wrapper)."""
+    from .rewriter import dag_rewrite
+    return dag_rewrite(aig, iterations=3, max_cut_size=4)
+
+
 DEFAULT_PASSES = [
     constant_propagation,
     structural_hashing,
     dead_node_elimination,
     simple_rewrite,
-    # Cleanup after rewriting
+    # Cleanup after simple rewriting
+    constant_propagation,
+    structural_hashing,
+    dead_node_elimination,
+    # DAG-aware rewriting
+    dag_rewrite_pass,
+    # Final cleanup
     constant_propagation,
     structural_hashing,
     dead_node_elimination,

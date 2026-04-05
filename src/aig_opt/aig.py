@@ -91,35 +91,68 @@ class AIG:
             # If the output was substituted, this gate is being replaced — skip it
         self.and_gates = new_gates
 
-    def compact(self) -> AIG:
-        """Renumber variables to a contiguous 1..N range. Returns self."""
-        # Collect all used variables
-        used_vars = set()
-        used_vars.update(self.inputs)
-        for v, _ in self.latches:
-            used_vars.add(v)
-        used_vars.update(self.and_gates.keys())
+    def topological_sort_gates(self) -> list[int]:
+        """Return gate variable indices in topological order (respecting dependencies)."""
+        order: list[int] = []
+        visited: set[int] = set()
+        gate_set = set(self.and_gates.keys())
 
-        # Also collect variables referenced in gate inputs/outputs
+        def visit(v: int) -> None:
+            if v in visited or v not in gate_set:
+                return
+            visited.add(v)
+            r0, r1 = self.and_gates[v]
+            visit(lit_to_var(r0))
+            visit(lit_to_var(r1))
+            order.append(v)
+
+        for v in self.and_gates:
+            visit(v)
+
+        return order
+
+    def compact(self) -> AIG:
+        """Renumber variables to a contiguous 1..N range using topological order. Returns self."""
+        # Topological sort of gates to get correct ordering
+        topo_gates = self.topological_sort_gates()
+
+        # Build ordered variable list: inputs first, then latches, then gates in topo order
+        ordered_vars: list[int] = []
+        seen: set[int] = set()
+
+        for v in self.inputs:
+            if v not in seen:
+                ordered_vars.append(v)
+                seen.add(v)
+        for v, _ in self.latches:
+            if v not in seen:
+                ordered_vars.append(v)
+                seen.add(v)
+        for v in topo_gates:
+            if v not in seen:
+                ordered_vars.append(v)
+                seen.add(v)
+
+        # Also include vars referenced but not defined (shouldn't happen in valid AIG)
+        all_referenced: set[int] = set()
         for r0, r1 in self.and_gates.values():
-            v0, v1 = lit_to_var(r0), lit_to_var(r1)
-            if v0 > 0:
-                used_vars.add(v0)
-            if v1 > 0:
-                used_vars.add(v1)
+            for lit in (r0, r1):
+                v = lit_to_var(lit)
+                if v > 0:
+                    all_referenced.add(v)
         for o in self.outputs:
             v = lit_to_var(o)
             if v > 0:
-                used_vars.add(v)
+                all_referenced.add(v)
         for _, nxt in self.latches:
             v = lit_to_var(nxt)
             if v > 0:
-                used_vars.add(v)
+                all_referenced.add(v)
+        for v in sorted(all_referenced - seen):
+            ordered_vars.append(v)
+            seen.add(v)
 
-        used_vars.discard(0)  # variable 0 is always constant false
-
-        # Create mapping: old var -> new var (preserving topological order)
-        sorted_vars = sorted(used_vars)
+        sorted_vars = ordered_vars
         var_map = {old: new for new, old in enumerate(sorted_vars, start=1)}
         var_map[0] = 0  # constant
 
@@ -177,7 +210,7 @@ class AIG:
             val[make_lit(var, True)] = 1 - v
 
         # Evaluate AND gates in topological order
-        for var in sorted(self.and_gates.keys()):
+        for var in self.topological_sort_gates():
             r0, r1 = self.and_gates[var]
             v0 = val.get(r0, 0)
             v1 = val.get(r1, 0)

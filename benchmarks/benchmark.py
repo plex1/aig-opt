@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark AIG optimizer against Yosys."""
+"""Benchmark AIG optimizer against Yosys (via pyosys)."""
 
 from __future__ import annotations
 
-import shutil
-import subprocess
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -19,12 +18,14 @@ from aig_opt.optimizer import optimize
 
 CIRCUITS_DIR = Path(__file__).parent / "circuits"
 
-YOSYS_SCRIPT = """\
-read_aiger {input}
-synth -flatten
-aigmap
-write_aiger -ascii {output}
-"""
+
+def _check_pyosys() -> bool:
+    """Check if pyosys is available."""
+    try:
+        from pyosys import libyosys  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def run_our_optimizer(input_path: Path) -> tuple[int, float]:
@@ -38,40 +39,49 @@ def run_our_optimizer(input_path: Path) -> tuple[int, float]:
 
 
 def run_yosys(input_path: Path) -> tuple[int | None, float | None]:
-    """Run Yosys optimization. Returns (gate_count, time_seconds) or (None, None)."""
-    yosys_bin = shutil.which("yosys")
-    if yosys_bin is None:
+    """Run Yosys optimization via pyosys. Returns (gate_count, time_seconds) or (None, None)."""
+    try:
+        from pyosys import libyosys as ys
+    except ImportError:
         return None, None
 
+    abs_input = str(input_path.resolve())
+
+    with tempfile.NamedTemporaryFile(suffix=".aag", delete=False) as out_f:
+        out_path = out_f.name
+
     try:
-        with tempfile.NamedTemporaryFile(suffix=".aag", delete=False) as out_f:
-            out_path = out_f.name
-        with tempfile.NamedTemporaryFile(suffix=".ys", mode="w", delete=False) as script_f:
-            script_f.write(YOSYS_SCRIPT.format(input=input_path, output=out_path))
-            script_path = script_f.name
-
         start = time.perf_counter()
-        result = subprocess.run(
-            [yosys_bin, "-s", script_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        elapsed = time.perf_counter() - start
 
-        if result.returncode != 0:
-            print(f"  Yosys error: {result.stderr[:200]}", file=sys.stderr)
-            return None, None
+        design = ys.Design()
+        # Suppress yosys log output by redirecting stdout/stderr
+        old_stdout_fd = os.dup(1)
+        old_stderr_fd = os.dup(2)
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        try:
+            ys.run_pass(f"read_aiger {abs_input}", design)
+            ys.run_pass("synth -flatten", design)
+            ys.run_pass("aigmap", design)
+            ys.run_pass(f"write_aiger -ascii {out_path}", design)
+        finally:
+            os.dup2(old_stdout_fd, 1)
+            os.dup2(old_stderr_fd, 2)
+            os.close(devnull_fd)
+            os.close(old_stdout_fd)
+            os.close(old_stderr_fd)
+
+        elapsed = time.perf_counter() - start
 
         out_aig = parse_aag(out_path)
         return out_aig.num_ands(), elapsed
 
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-        print(f"  Yosys failed: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"  Yosys failed on {input_path.name}: {e}", file=sys.stderr)
         return None, None
     finally:
         Path(out_path).unlink(missing_ok=True)
-        Path(script_path).unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -80,7 +90,7 @@ def main() -> None:
         print("No .aag files found in", CIRCUITS_DIR)
         return
 
-    has_yosys = shutil.which("yosys") is not None
+    has_yosys = _check_pyosys()
 
     # Header
     header = f"{'Circuit':<20} {'Original':>8} {'aig-opt':>8}"
@@ -91,7 +101,7 @@ def main() -> None:
     else:
         header += f" {'Our Time':>10}"
         sep += f" {'─' * 10}"
-        print("Note: Yosys not found. Install yosys to enable comparison.\n")
+        print("Note: pyosys not found. Install with: pip install pyosys\n")
 
     print(header)
     print(sep)
@@ -117,6 +127,8 @@ def main() -> None:
 
     print()
     print("Gate counts represent number of AND gates in the AIG.")
+    if has_yosys:
+        print("Yosys pipeline: read_aiger -> synth -flatten -> aigmap -> write_aiger")
 
 
 if __name__ == "__main__":

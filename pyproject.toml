@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "aig-opt"
+version = "0.1.0"
+description = "A simple AIG optimizer in pure Python with Yosys benchmarking"
+requires-python = ">=3.10"
+license = "LGPL-3.0-or-later"
+
+[project.scripts]
+aig-opt = "aig_opt.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

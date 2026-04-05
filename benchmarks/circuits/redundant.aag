@@ -1,0 +1,34 @@
+aag 9 2 0 4 7
+2
+4
+6
+19
+12
+14
+6 2 4
+8 2 4
+10 2 0
+12 2 2
+14 2 3
+16 6 10
+18 7 9
+i0 a
+i1 b
+o0 a_and_b
+o1 redundant_or
+o2 a_and_a
+o3 a_and_not_a
+c
+Redundant circuit with deliberate optimization opportunities:
+var3=a AND b (gate 6 2 4)
+var4=a AND b DUPLICATE (gate 8 2 4) => structural hashing
+var5=a AND 0 = 0 (gate 10 2 0) => constant propagation
+var6=a AND a = a (gate 12 2 2) => trivial simplification
+var7=a AND !a = 0 (gate 14 2 3) => trivial simplification
+var8=var3 AND var5 (gate 16 6 10) => dead node (not in output)
+var9=!var3 AND !var4 (gate 18 7 9) => after hash: !var3 AND !var3 = !var3
+output0 = var3 = a AND b
+output1 = !var9 = after opt should equal var3
+output2 = var6 = after opt should equal a
+output3 = var7 = after opt should equal 0
+Expected: 7 gates -> 1 gate

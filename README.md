@@ -145,6 +145,36 @@ tests/
 - `pyosys` (optional, for Yosys and ABC benchmarking): `pip install pyosys`
 - `pytest` (for tests): `pip install pytest`
 
+## Known Limitations and Future Work
+
+The optimizer matches ABC `&deepsyn` on 8/15 benchmark circuits. The remaining gaps fall into two categories:
+
+### Per-node rewriting cannot discover cross-output gate sharing
+
+The DAG rewriter optimizes one node at a time — it picks a cut around a single node, computes its truth table, and resynthesizes it. It cannot discover gate sharing **across outputs**.
+
+Example: the half adder has two outputs (sum = a XOR b, carry = a AND b). Our optimizer synthesizes each independently: 3 AND gates for XOR + 1 for carry = 4 total. But there is a 3-gate implementation that shares a gate:
+
+```
+g1 = a AND b              (this IS the carry)
+g2 = NOT(a) AND NOT(b)    (both inputs low)
+g3 = NOT(g1) AND NOT(g2)  (= XOR: exactly one input high)
+```
+
+Carry = g1, Sum = g3 — three gates, both outputs covered. ABC finds this via SAT-based exact synthesis, which encodes "can these functions be implemented with N AND gates?" as a satisfiability problem that naturally explores cross-output sharing.
+
+**Affected circuits**: full_adder (9 vs ABC's 7), half_adder (4 vs 3).
+
+**Fix**: multi-output exact synthesis for small subcircuits — enumerate all possible gate networks up to a size bound and check if they jointly implement the required output functions.
+
+### k=5 cut window is too small for large circuits
+
+The rewriter uses cuts of up to 5 inputs. For 32-input circuits, this means each rewrite only sees a small fraction of the logic at once and cannot perform the large-scale restructuring that ABC achieves.
+
+**Affected circuits**: rand_xlarge_clean (104 vs ABC's 94), rand_xlarge_redund (89 vs 81).
+
+**Fix**: larger cut sizes (k=6+), window-based rewriting that considers larger subgraphs, or global restructuring passes like BDD-based resynthesis.
+
 ## License
 
 LGPL-3.0-or-later

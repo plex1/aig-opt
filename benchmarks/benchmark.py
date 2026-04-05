@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Benchmark AIG optimizer against Yosys (via pyosys)."""
+"""Benchmark AIG optimizer against Yosys and ABC &deepsyn."""
 
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -20,13 +21,86 @@ CIRCUITS_DIR = Path(__file__).parent / "circuits"
 
 
 def _check_pyosys() -> bool:
-    """Check if pyosys is available."""
     try:
         from pyosys import libyosys  # noqa: F401
         return True
     except ImportError:
         return False
 
+
+def _find_abc_binary() -> str | None:
+    """Find the yosys-abc binary bundled with pyosys."""
+    try:
+        import pyosys
+        abc = Path(pyosys.__file__).parent / "yosys-abc"
+        if abc.exists():
+            return str(abc)
+    except ImportError:
+        pass
+    return None
+
+
+def _suppress_fds():
+    """Context-manager-like helpers to suppress stdout/stderr at fd level."""
+    old1 = os.dup(1)
+    old2 = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    return old1, old2, devnull
+
+
+def _restore_fds(old1, old2, devnull):
+    os.dup2(old1, 1)
+    os.dup2(old2, 2)
+    os.close(devnull)
+    os.close(old1)
+    os.close(old2)
+
+
+def _aag_to_aig(input_aag: Path, output_aig: str) -> bool:
+    """Convert ASCII .aag to binary .aig using pyosys."""
+    try:
+        from pyosys import libyosys as ys
+        design = ys.Design()
+        old1, old2, devnull = _suppress_fds()
+        try:
+            ys.run_pass(f"read_aiger {input_aag.resolve()}", design)
+            ys.run_pass(f"write_aiger {output_aig}", design)
+        finally:
+            _restore_fds(old1, old2, devnull)
+        return True
+    except Exception:
+        return False
+
+
+def _aig_to_gate_count(aig_path: str) -> int | None:
+    """Read a binary .aig via pyosys and count AND gates."""
+    aag_path = None
+    try:
+        from pyosys import libyosys as ys
+        with tempfile.NamedTemporaryFile(suffix=".aag", delete=False) as f:
+            aag_path = f.name
+        design = ys.Design()
+        old1, old2, devnull = _suppress_fds()
+        try:
+            ys.run_pass(f"read_aiger {aig_path}", design)
+            ys.run_pass("aigmap", design)
+            ys.run_pass(f"write_aiger -ascii {aag_path}", design)
+        finally:
+            _restore_fds(old1, old2, devnull)
+        aig = parse_aag(aag_path)
+        return aig.num_ands()
+    except Exception:
+        return None
+    finally:
+        if aag_path:
+            Path(aag_path).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Runners
+# ---------------------------------------------------------------------------
 
 def run_our_optimizer(input_path: Path) -> tuple[int, float]:
     """Run our optimizer. Returns (gate_count, time_seconds)."""
@@ -39,50 +113,103 @@ def run_our_optimizer(input_path: Path) -> tuple[int, float]:
 
 
 def run_yosys(input_path: Path) -> tuple[int | None, float | None]:
-    """Run Yosys optimization via pyosys. Returns (gate_count, time_seconds) or (None, None)."""
+    """Run Yosys synth -flatten -> aigmap. Returns (gate_count, time) or (None, None)."""
     try:
         from pyosys import libyosys as ys
     except ImportError:
         return None, None
 
-    abs_input = str(input_path.resolve())
-
-    with tempfile.NamedTemporaryFile(suffix=".aag", delete=False) as out_f:
-        out_path = out_f.name
+    with tempfile.NamedTemporaryFile(suffix=".aag", delete=False) as f:
+        out_path = f.name
 
     try:
         start = time.perf_counter()
-
         design = ys.Design()
-        # Suppress yosys log output by redirecting stdout/stderr
-        old_stdout_fd = os.dup(1)
-        old_stderr_fd = os.dup(2)
-        devnull_fd = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull_fd, 1)
-        os.dup2(devnull_fd, 2)
+        old1, old2, devnull = _suppress_fds()
         try:
-            ys.run_pass(f"read_aiger {abs_input}", design)
+            ys.run_pass(f"read_aiger {input_path.resolve()}", design)
             ys.run_pass("synth -flatten", design)
             ys.run_pass("aigmap", design)
             ys.run_pass(f"write_aiger -ascii {out_path}", design)
         finally:
-            os.dup2(old_stdout_fd, 1)
-            os.dup2(old_stderr_fd, 2)
-            os.close(devnull_fd)
-            os.close(old_stdout_fd)
-            os.close(old_stderr_fd)
-
+            _restore_fds(old1, old2, devnull)
         elapsed = time.perf_counter() - start
-
         out_aig = parse_aag(out_path)
         return out_aig.num_ands(), elapsed
-
     except Exception as e:
         print(f"  Yosys failed on {input_path.name}: {e}", file=sys.stderr)
         return None, None
     finally:
         Path(out_path).unlink(missing_ok=True)
 
+
+def run_abc_deepsyn(
+    input_path: Path, timeout: int = 5, iterations: int = 2,
+) -> tuple[int | None, float | None]:
+    """Run ABC &deepsyn on the circuit. Returns (gate_count, time) or (None, None).
+
+    First runs Yosys synth to reduce the circuit (ABC &deepsyn works best on
+    already-optimized AIGs), then applies &deepsyn for deeper optimization.
+    """
+    abc_bin = _find_abc_binary()
+    if abc_bin is None:
+        return None, None
+
+    in_aig = None
+    out_aig = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".aig", delete=False) as f:
+            in_aig = f.name
+        with tempfile.NamedTemporaryFile(suffix=".aig", delete=False) as f:
+            out_aig = f.name
+
+        # Convert .aag -> binary .aig via Yosys (includes synth pre-optimization)
+        try:
+            from pyosys import libyosys as ys
+            design = ys.Design()
+            old1, old2, devnull = _suppress_fds()
+            try:
+                ys.run_pass(f"read_aiger {input_path.resolve()}", design)
+                ys.run_pass("synth -flatten", design)
+                ys.run_pass("aigmap", design)
+                ys.run_pass(f"write_aiger {in_aig}", design)
+            finally:
+                _restore_fds(old1, old2, devnull)
+        except Exception:
+            return None, None
+
+        # Run ABC &deepsyn (&put converts back to old-style for write_aiger)
+        cmd = f"&read {in_aig}; &deepsyn -T {timeout} -I {iterations}; &put; write_aiger {out_aig}"
+        start = time.perf_counter()
+        result = subprocess.run(
+            [abc_bin, "-c", cmd],
+            capture_output=True,
+            timeout=timeout * iterations + 15,
+        )
+        elapsed = time.perf_counter() - start
+
+        if result.returncode != 0:
+            return None, None
+
+        # Count gates in result
+        gates = _aig_to_gate_count(out_aig)
+        if gates is None:
+            return None, None
+        return gates, elapsed
+
+    except (subprocess.TimeoutExpired, Exception) as e:
+        print(f"  ABC failed on {input_path.name}: {e}", file=sys.stderr)
+        return None, None
+    finally:
+        if in_aig:
+            Path(in_aig).unlink(missing_ok=True)
+        if out_aig:
+            Path(out_aig).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     circuits = sorted(CIRCUITS_DIR.glob("*.aag"))
@@ -91,20 +218,27 @@ def main() -> None:
         return
 
     has_yosys = _check_pyosys()
+    has_abc = _find_abc_binary() is not None
 
     # Header
-    header = f"{'Circuit':<20} {'Original':>8} {'aig-opt':>8}"
-    sep = f"{'─' * 20} {'─' * 8} {'─' * 8}"
+    cols = [f"{'Circuit':<25}", f"{'Orig':>5}", f"{'aig-opt':>7}"]
+    seps = [f"{'─' * 25}", f"{'─' * 5}", f"{'─' * 7}"]
     if has_yosys:
-        header += f" {'Yosys':>8} {'Our Time':>10} {'Yosys Time':>10}"
-        sep += f" {'─' * 8} {'─' * 10} {'─' * 10}"
-    else:
-        header += f" {'Our Time':>10}"
-        sep += f" {'─' * 10}"
-        print("Note: pyosys not found. Install with: pip install pyosys\n")
+        cols.append(f"{'Yosys':>7}")
+        seps.append(f"{'─' * 7}")
+    if has_abc:
+        cols.append(f"{'ABC ds':>7}")
+        seps.append(f"{'─' * 7}")
+    cols += [f"{'Our Time':>9}", f"{'Yosys T':>8}", f"{'ABC T':>8}"]
+    seps += [f"{'─' * 9}", f"{'─' * 8}", f"{'─' * 8}"]
 
-    print(header)
-    print(sep)
+    if not has_yosys:
+        print("Note: pyosys not found. Install with: pip install pyosys\n")
+    if not has_abc:
+        print("Note: yosys-abc not found.\n")
+
+    print(" ".join(cols))
+    print(" ".join(seps))
 
     for circuit_path in circuits:
         name = circuit_path.name
@@ -113,22 +247,32 @@ def main() -> None:
 
         opt_gates, opt_time = run_our_optimizer(circuit_path)
 
-        line = f"{name:<20} {orig_gates:>8} {opt_gates:>8}"
+        parts = [f"{name:<25}", f"{orig_gates:>5}", f"{opt_gates:>7}"]
 
         if has_yosys:
-            yosys_gates, yosys_time = run_yosys(circuit_path)
-            yosys_str = str(yosys_gates) if yosys_gates is not None else "N/A"
-            yosys_time_str = f"{yosys_time:.4f}s" if yosys_time is not None else "N/A"
-            line += f" {yosys_str:>8} {opt_time:>9.4f}s {yosys_time_str:>10}"
+            yg, yt = run_yosys(circuit_path)
+            parts.append(f"{yg if yg is not None else 'N/A':>7}")
         else:
-            line += f" {opt_time:>9.4f}s"
+            yg, yt = None, None
+            parts.append(f"{'—':>7}")
 
-        print(line)
+        if has_abc:
+            ag, at = run_abc_deepsyn(circuit_path)
+            parts.append(f"{ag if ag is not None else 'N/A':>7}")
+        else:
+            ag, at = None, None
+            parts.append(f"{'—':>7}")
+
+        parts.append(f"{opt_time:>8.3f}s")
+        parts.append(f"{yt:>7.3f}s" if yt is not None else f"{'—':>8}")
+        parts.append(f"{at:>7.3f}s" if at is not None else f"{'—':>8}")
+
+        print(" ".join(parts))
 
     print()
-    print("Gate counts represent number of AND gates in the AIG.")
-    if has_yosys:
-        print("Yosys pipeline: read_aiger -> synth -flatten -> aigmap -> write_aiger")
+    print("Gate counts = number of AND gates in the AIG.")
+    print("Yosys: read_aiger -> synth -flatten -> aigmap -> write_aiger")
+    print("ABC ds: Yosys synth -> &deepsyn -T 5 -I 2 -> &write")
 
 
 if __name__ == "__main__":

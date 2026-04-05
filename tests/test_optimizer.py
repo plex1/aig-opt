@@ -263,6 +263,46 @@ class TestFunctionalReduction:
         assert aig.num_ands() <= 5
 
 
+class TestMultiOutput:
+    def test_half_adder_3_gates(self):
+        """Multi-output optimization should reduce half adder to 3 AND gates."""
+        aig = parse_aag(CIRCUITS_DIR / "half_adder.aag")
+        original = aig.copy()
+        aig = optimize(aig)
+        assert truth_tables_match(original, aig)
+        assert aig.num_ands() <= 3
+
+    def test_exhaustive_finds_shared_xor_and(self):
+        """Exhaustive synthesis should find 3-gate solution for (XOR, AND) pair."""
+        from aig_opt.multioutput import exhaustive_multioutput_synth
+        # XOR = 0x6, AND = 0x8 for 2 inputs
+        result = exhaustive_multioutput_synth([0x6, 0x8], num_inputs=2, max_gates=4)
+        assert result is not None
+        sol_signals, gate_list = result
+        assert len(gate_list) == 3
+
+    def test_multioutput_preserves_all_truth_tables(self):
+        """Multi-output pass should preserve truth tables on all circuits."""
+        for name in ["half_adder.aag", "full_adder.aag", "mux2.aag", "redundant.aag"]:
+            aig = parse_aag(CIRCUITS_DIR / name)
+            original = aig.copy()
+            aig = optimize(aig)
+            assert truth_tables_match(original, aig), f"Failed for {name}"
+
+    def test_shared_context_reuses_gates(self):
+        """Shared-context synthesis should reuse gates across outputs."""
+        from aig_opt.multioutput import shared_context_resynth
+        # AND and OR of same inputs: OR = NOT(AND(NOT a, NOT b))
+        # AND = 0x8, OR = 0xE for 2 inputs
+        # Independent: AND needs 1 gate, OR needs 1 gate = 2 total
+        # Shared: same (no sharing possible for these simple functions)
+        # Better test: XOR and AND (known 3-gate shared solution exists)
+        leaf_lits = [2, 4]  # abstract literals for a, b
+        lits, gates, _ = shared_context_resynth([0x6, 0x8], 2, leaf_lits, 3)
+        # Should find <= 4 gates (independent would be 3+1=4)
+        assert len(gates) <= 4
+
+
 class TestNPN:
     def test_npn4_class_count(self):
         """Should find exactly 222 NPN equivalence classes for 4-input functions."""

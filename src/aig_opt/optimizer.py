@@ -242,6 +242,12 @@ def functional_reduction_pass(aig: AIG) -> AIG:
     return aig
 
 
+def multioutput_resynth_pass(aig: AIG) -> AIG:
+    """Multi-output resynthesis: find gate sharing across outputs."""
+    from .multioutput import multioutput_resynth
+    return multioutput_resynth(aig)
+
+
 DEFAULT_PASSES = [
     constant_propagation,
     structural_hashing,
@@ -258,6 +264,8 @@ DEFAULT_PASSES = [
     dead_node_elimination,
     # DAG-aware rewriting
     dag_rewrite_pass,
+    # Multi-output resynthesis (finds gate sharing across outputs)
+    multioutput_resynth_pass,
     # Post-rewrite functional reduction (rewriting may expose new equivalences)
     functional_reduction_pass,
     # Final cleanup

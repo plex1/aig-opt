@@ -17,12 +17,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("input", help="Input .aag file")
     parser.add_argument("-o", "--output", help="Output file (default: stdout)")
     parser.add_argument(
-        "--rounds",
-        type=int,
-        default=1,
-        help="Number of full pipeline rounds (default: 1, stops early if no improvement)",
-    )
-    parser.add_argument(
         "--stats",
         action="store_true",
         help="Print before/after gate counts to stderr",
@@ -32,7 +26,7 @@ def main(argv: list[str] | None = None) -> None:
     aig = parse_aag(args.input)
     before = aig.num_ands()
 
-    aig = optimize(aig, rounds=args.rounds)
+    aig = optimize(aig)
     aig.compact()
 
     after = aig.num_ands()

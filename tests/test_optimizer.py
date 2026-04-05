@@ -200,6 +200,69 @@ class TestOptimize:
         assert tt[7] == {0: True, 1: True}
 
 
+class TestFunctionalReduction:
+    def test_detects_constant_nodes(self):
+        """Functional reduction should detect nodes that are always 0 or 1."""
+        # Build: x AND (NOT x) = 0, but wrap it so structural propagation misses it
+        # (a AND b) AND (a AND NOT b) is always 0
+        aig = AIG(
+            max_var=5,
+            inputs=[1, 2],
+            outputs=[make_lit(5)],
+            and_gates={
+                3: (make_lit(1), make_lit(2)),       # a AND b
+                4: (make_lit(1), negate(make_lit(2))),  # a AND NOT b
+                5: (make_lit(3), make_lit(4)),        # (a AND b) AND (a AND NOT b) = 0
+            },
+        )
+        from aig_opt.fraig import functional_reduction
+        aig = functional_reduction(aig)
+        from aig_opt.optimizer import constant_propagation, dead_node_elimination
+        aig = constant_propagation(aig)
+        aig = dead_node_elimination(aig)
+        # Output should be constant 0
+        assert aig.outputs[0] == CONST_FALSE
+
+    def test_detects_equivalent_nodes(self):
+        """Functional reduction should merge nodes computing the same function."""
+        # Two structurally different but functionally equivalent subcircuits
+        # f1 = a AND b, f2 = NOT(NOT(a) OR NOT(b)) = a AND b via De Morgan
+        # Build f2 as NOT(NOT_a_OR_NOT_b) where NOT_a_OR_NOT_b = NOT(a AND b)
+        # Actually simpler: just make two identical gates with different var numbers
+        # that structural hashing would NOT catch due to intermediate structure
+        aig = AIG(
+            max_var=6,
+            inputs=[1, 2],
+            outputs=[make_lit(6)],  # use f1 XOR f2 = should be 0
+            and_gates={
+                3: (make_lit(1), make_lit(2)),  # f1 = a AND b
+                # f2 = NOT(NOT a OR NOT b) = NOT(NAND(a,b)) = AND(a,b)
+                # but built differently: 4 = NAND(a,b) = NOT(a AND b), 5 = NOT(4)
+                # We can't directly build NOT as a gate, so let's use:
+                # 4 = a AND b (duplicate — structural hash catches this)
+                # Instead: test with outputs that reference same function differently
+                # Better: build x AND (x OR y) = x AND (NOT(NOT x AND NOT y))
+                4: (negate(make_lit(1)), negate(make_lit(2))),  # NOT a AND NOT b
+                5: (make_lit(1), negate(make_lit(4))),  # a AND NOT(NOT a AND NOT b) = a AND (a OR b) = a
+                # So node 5 == node 1 (input a). fraig should detect this.
+                6: (make_lit(5), negate(make_lit(1))),  # a AND NOT a = 0, after merging 5->1
+            },
+        )
+        from aig_opt.optimizer import functional_reduction_pass
+        aig = functional_reduction_pass(aig)
+        assert aig.outputs[0] == CONST_FALSE
+
+    def test_deep_circuit_reduction(self):
+        """Circuits with deep redundancy should be significantly reduced."""
+        path = CIRCUITS_DIR / "rand_deep_med.aag"
+        aig = parse_aag(path)
+        original = aig.copy()
+        aig = optimize(aig)
+        assert truth_tables_match(original, aig)
+        # Should get close to ABC's result of 1 gate
+        assert aig.num_ands() <= 5
+
+
 class TestNPN:
     def test_npn4_class_count(self):
         """Should find exactly 222 NPN equivalence classes for 4-input functions."""

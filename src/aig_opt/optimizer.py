@@ -223,7 +223,31 @@ def dag_rewrite_pass(aig: AIG) -> AIG:
     return dag_rewrite(aig, iterations=10, max_cut_size=5)
 
 
+def functional_reduction_pass(aig: AIG) -> AIG:
+    """Simulation-based functional equivalence detection and merging.
+
+    Iterates until no more merges are found, since merging nodes can
+    expose new equivalences (e.g., a gate becomes constant after its
+    input is merged with another node).
+    """
+    from .fraig import functional_reduction
+    for _ in range(20):  # safety limit
+        prev = aig.num_ands()
+        aig = functional_reduction(aig)
+        aig = constant_propagation(aig)
+        aig = structural_hashing(aig)
+        aig = dead_node_elimination(aig)
+        if aig.num_ands() >= prev:
+            break
+    return aig
+
+
 DEFAULT_PASSES = [
+    constant_propagation,
+    structural_hashing,
+    dead_node_elimination,
+    # Functional reduction (catches equivalences structural passes miss)
+    functional_reduction_pass,
     constant_propagation,
     structural_hashing,
     dead_node_elimination,
@@ -234,6 +258,8 @@ DEFAULT_PASSES = [
     dead_node_elimination,
     # DAG-aware rewriting
     dag_rewrite_pass,
+    # Post-rewrite functional reduction (rewriting may expose new equivalences)
+    functional_reduction_pass,
     # Final cleanup
     constant_propagation,
     structural_hashing,

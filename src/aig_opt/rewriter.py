@@ -447,7 +447,7 @@ def _validate_cut(aig: AIG, root_var: int, cut_leaves: frozenset[int]) -> bool:
     return all(leaf in reachable for leaf in cut_leaves)
 
 
-def dag_rewrite(aig: AIG, iterations: int = 10, max_cut_size: int = 4) -> AIG:
+def dag_rewrite(aig: AIG, iterations: int = 10, max_cut_size: int = 5) -> AIG:
     """DAG-aware AIG rewriting.
 
     For each node, enumerates k-feasible cuts, evaluates the truth table,
@@ -491,18 +491,26 @@ def dag_rewrite(aig: AIG, iterations: int = 10, max_cut_size: int = 4) -> AIG:
                 if n == 0:
                     continue
 
+                # Quick NPN check: can we possibly improve?
+                from .npn import get_optimal_gate_count
+                optimal = get_optimal_gate_count(tt, n)
+                if optimal is not None and optimal >= current_cost:
+                    continue  # No possible improvement
+
                 leaf_lits = [make_lit(v) for v in leaves]
 
-                # Synthesize in isolation
-                ctx = SynthesisContext(hash_table, aig.max_var + 1)
-                new_lit = synthesize_tt(tt, n, leaf_lits, ctx)
-                new_cost = ctx.num_new_gates
+                # Multi-decomposition synthesis (tries all k! variable orderings)
+                from .npn import synthesize_optimal
+                new_lit, new_gates, new_next_var = synthesize_optimal(
+                    tt, n, leaf_lits, hash_table, aig.max_var + 1,
+                )
+                new_cost = len(new_gates)
 
                 saving = current_cost - new_cost
                 if saving > best_saving:
                     # Verify correctness before accepting
-                    if verify_synthesis(aig, ctx.new_gates, new_lit, tt, leaves):
-                        best_replacement = (new_lit, ctx.new_gates, ctx.next_var)
+                    if verify_synthesis(aig, new_gates, new_lit, tt, leaves):
+                        best_replacement = (new_lit, new_gates, new_next_var)
                         best_saving = saving
 
             if best_replacement is not None:

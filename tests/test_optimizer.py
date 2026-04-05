@@ -200,6 +200,75 @@ class TestOptimize:
         assert tt[7] == {0: True, 1: True}
 
 
+class TestNPN:
+    def test_npn4_class_count(self):
+        """Should find exactly 222 NPN equivalence classes for 4-input functions."""
+        from aig_opt.npn import _NPN4_OPTIMAL
+        assert len(_NPN4_OPTIMAL) == 222
+
+    def test_npn4_gate_counts_reasonable(self):
+        """All 4-input NPN classes should need 0-14 AND gates."""
+        from aig_opt.npn import _NPN4_OPTIMAL
+        for canon, gates in _NPN4_OPTIMAL.items():
+            assert 0 <= gates <= 14, f"Canon {canon:#x}: {gates} gates"
+
+    def test_npn_canonical_symmetry(self):
+        """AND and OR should be NPN-equivalent (OR = NOT(AND(NOT,NOT)))."""
+        from aig_opt.npn import npn_canonical
+        # 2-input: AND = 0b1000, OR = 0b1110
+        assert npn_canonical(0b1000, 2) == npn_canonical(0b1110, 2)
+
+    def test_npn_canonical_negation(self):
+        """A function and its complement should have the same NPN canonical form."""
+        from aig_opt.npn import npn_canonical, _tt_mask
+        tt = 0b10110100  # arbitrary 3-input function
+        mask = _tt_mask(3)
+        assert npn_canonical(tt, 3) == npn_canonical(tt ^ mask, 3)
+
+    def test_multi_decomposition_improves(self):
+        """Multi-decomposition should find implementations as good or better than single."""
+        from aig_opt.npn import synthesize_optimal, _synthesize_and_count
+        from aig_opt.rewriter import SynthesisContext, synthesize_tt
+        from aig_opt.aig import make_lit
+
+        # XOR3 = a XOR b XOR c (truth table 0x96 for 3 inputs)
+        tt = 0x96
+        n = 3
+        leaf_lits = [make_lit(1), make_lit(2), make_lit(3)]
+        empty_hash: dict[tuple[int, int], int] = {}
+
+        # Single decomposition (heuristic)
+        ctx = SynthesisContext(empty_hash, 4)
+        synthesize_tt(tt, n, leaf_lits, ctx)
+        single_cost = ctx.num_new_gates
+
+        # Multi-decomposition
+        _, new_gates, _ = synthesize_optimal(tt, n, leaf_lits, empty_hash, 4)
+        multi_cost = len(new_gates)
+
+        assert multi_cost <= single_cost
+
+    def test_npn5_cache(self):
+        """NPN5 cache should return consistent results."""
+        from aig_opt.npn import get_optimal_gate_count
+        import random
+        rng = random.Random(99)
+        tt = rng.randint(0, (1 << 32) - 1)
+        g1 = get_optimal_gate_count(tt, 5)
+        g2 = get_optimal_gate_count(tt, 5)
+        assert g1 == g2
+        assert g1 is not None and g1 >= 0
+
+    def test_all_circuits_correctness_with_k5(self):
+        """All benchmark circuits should preserve truth tables with k=5 optimization."""
+        for name in ["half_adder.aag", "full_adder.aag", "mux2.aag", "redundant.aag"]:
+            path = CIRCUITS_DIR / name
+            aig = parse_aag(path)
+            original = aig.copy()
+            aig = optimize(aig)
+            assert truth_tables_match(original, aig), f"Failed for {name}"
+
+
 class TestCompact:
     def test_compact_renumbers(self):
         """Compact should renumber variables to 1..N."""

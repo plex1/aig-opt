@@ -220,7 +220,7 @@ def simple_rewrite(aig: AIG) -> AIG:
 def dag_rewrite_pass(aig: AIG) -> AIG:
     """DAG-aware rewriting pass (wrapper)."""
     from .rewriter import dag_rewrite
-    return dag_rewrite(aig, iterations=3, max_cut_size=4)
+    return dag_rewrite(aig, iterations=10, max_cut_size=5)
 
 
 DEFAULT_PASSES = [

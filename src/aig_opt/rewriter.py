@@ -54,7 +54,7 @@ def enumerate_cuts(aig: AIG, max_cut_size: int = 4) -> dict[int, list[frozenset[
                     seen.add(merged)
                     node_cuts.append(merged)
 
-        cuts[var] = node_cuts[:24]
+        cuts[var] = node_cuts[:48]
 
     return cuts
 

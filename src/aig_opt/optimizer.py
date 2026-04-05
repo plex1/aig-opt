@@ -267,18 +267,25 @@ DEFAULT_PASSES = [
 ]
 
 
-def optimize(aig: AIG, passes: list | None = None) -> AIG:
+def optimize(aig: AIG, passes: list | None = None, rounds: int = 1) -> AIG:
     """Run optimization passes on the AIG.
 
     Args:
         aig: The AIG to optimize (modified in place)
         passes: Optional list of pass functions. Uses DEFAULT_PASSES if None.
+        rounds: Number of times to run the full pipeline. The pipeline repeats
+                until either `rounds` iterations complete or gate count stops
+                improving.
 
     Returns:
         The optimized AIG
     """
     if passes is None:
         passes = DEFAULT_PASSES
-    for pass_fn in passes:
-        aig = pass_fn(aig)
+    for _ in range(rounds):
+        prev_gates = aig.num_ands()
+        for pass_fn in passes:
+            aig = pass_fn(aig)
+        if aig.num_ands() >= prev_gates:
+            break
     return aig

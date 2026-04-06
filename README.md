@@ -94,6 +94,29 @@ where `f|x=1` and `f|x=0` are the positive and negative cofactors. Special cases
 
 The entire rewrite loop runs for up to 10 iterations, with cuts recomputed after each pass of replacements.
 
+### Resubstitution (planned)
+
+Resubstitution is a fundamentally different optimization from cut-based rewriting. Where rewriting asks "can I build a better circuit for this function from primary inputs?", resubstitution asks "can I express this node as a simple function of **other existing nodes** already in the circuit?"
+
+**Why rewriting isn't enough**: After DAG-aware rewriting, the multiplier has 104 gates. Only 1 of ~2800 cuts has subgraph cost above the NPN-optimal minimum — the rewriter has squeezed every per-cut opportunity dry. But 64 of those 104 gates have fanout=1 (used exactly once). These are candidates for removal if their function can be expressed using other signals that already exist in the circuit.
+
+**How it works**: For each gate X computing some function f:
+
+1. **Collect divisors**: gather other nodes in X's neighborhood — nodes in its fanin cone and nearby nodes at similar topological depth. These are the "building blocks" available for resubstitution.
+
+2. **Simulate**: compute 64-bit random simulation signatures for X and all divisors. This enables fast candidate filtering:
+   - **0-resub**: does any divisor's signature match X? (X is redundant — equivalent to an existing node)
+   - **1-resub**: do any two divisors d_i, d_j satisfy `sig_X == sig_i AND sig_j`? (X = d_i AND d_j — replace with one gate)
+   - **2-resub**: can X be expressed as `(d_i OP d_j) OP d_k`? (replace with two gates)
+
+3. **Verify**: confirm simulation candidates with exhaustive checking.
+
+4. **Replace**: substitute X with the simpler expression. Dead node elimination removes X's now-unreferenced subgraph.
+
+**Why it helps multipliers**: Multipliers have dense gate sharing — partial products and carry chains create many signals that are simple functions of each other. A carry bit might equal `existing_node_A AND existing_node_B`, but the rewriter can't see this because it only looks at cuts rooted at that node. Resubstitution checks all pairs of existing nodes, finding relationships invisible to per-cut analysis.
+
+This is equivalent to ABC's `resub` command, one of the most effective passes for arithmetic circuits.
+
 ## Pipeline Order
 
 Default pipeline:
@@ -102,6 +125,7 @@ constant_propagation -> structural_hashing -> dead_node_elimination
     -> functional_reduction (iterative)
     -> simple_rewrite -> cleanup
     -> dag_rewrite (10 iterations, k=5 cuts, NPN + multi-decomposition)
+    -> resubstitution (simulation-guided, 0/1/2-resub)
     -> functional_reduction (iterative)
     -> final cleanup
 ```
@@ -193,6 +217,7 @@ src/aig_opt/
   npn.py           # NPN canonicalization, precomputed tables, synthesis dispatch
   npn4_networks.json # Precomputed exact gate networks for 24 NPN4 classes
   fraig.py         # Simulation-based functional reduction
+  resub.py         # Simulation-guided resubstitution
   balance.py       # AIG balancing (AND chain -> balanced tree)
   multioutput.py   # Multi-output exact synthesis
   cli.py           # CLI entry point

@@ -330,6 +330,8 @@ def _instantiate_network(
         sig_to_lit[n_base + 2 * gi] = make_lit(var)
         sig_to_lit[n_base + 2 * gi + 1] = negate(make_lit(var))
 
+    if output_signal is None:
+        return CONST_FALSE, new_gates, next_var
     if output_signal >= 0:
         result_lit = sig_to_lit[output_signal]
     else:

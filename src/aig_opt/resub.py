@@ -54,6 +54,72 @@ def _topo_index(aig: AIG) -> dict[int, int]:
     return idx
 
 
+def _verify_and_resub(aig: AIG, target: int, lit_a: int, lit_b: int) -> bool:
+    """Verify target == AND(lit_a, lit_b) without creating any gate.
+
+    Simulates the existing AIG and checks that for all input patterns,
+    sig[target] == sig[lit_a] & sig[lit_b]. No gate is added to the AIG.
+    """
+    n = len(aig.inputs)
+    gates = aig.topological_sort_gates()
+    va, vb = lit_to_var(lit_a), lit_to_var(lit_b)
+    na, nb = is_negated(lit_a), is_negated(lit_b)
+
+    if n <= 20:
+        total = 1 << n
+        for block in range(0, total, 64):
+            bs = min(64, total - block)
+            sig: dict[int, int] = {0: 0}
+            for idx, v in enumerate(aig.inputs):
+                w = 0
+                for j in range(bs):
+                    if ((block + j) >> idx) & 1:
+                        w |= 1 << j
+                sig[v] = w
+            for v in gates:
+                if v not in aig.and_gates:
+                    continue
+                r0, r1 = aig.and_gates[v]
+                s0 = sig.get(lit_to_var(r0), 0)
+                s1 = sig.get(lit_to_var(r1), 0)
+                if r0 & 1: s0 = ~s0 & MASK64
+                if r1 & 1: s1 = ~s1 & MASK64
+                sig[v] = s0 & s1
+
+            mask = (1 << bs) - 1
+            st = sig.get(target, 0) & mask
+            sa = sig.get(va, 0) & mask
+            sb = sig.get(vb, 0) & mask
+            if na: sa = ~sa & mask
+            if nb: sb = ~sb & mask
+            if st != (sa & sb):
+                return False
+        return True
+    else:
+        rng = random.Random(54321)
+        for _ in range(64):
+            sig: dict[int, int] = {0: 0}
+            for v in aig.inputs:
+                sig[v] = rng.getrandbits(64)
+            for v in gates:
+                if v not in aig.and_gates:
+                    continue
+                r0, r1 = aig.and_gates[v]
+                s0 = sig.get(lit_to_var(r0), 0)
+                s1 = sig.get(lit_to_var(r1), 0)
+                if r0 & 1: s0 = ~s0 & MASK64
+                if r1 & 1: s1 = ~s1 & MASK64
+                sig[v] = s0 & s1
+            st = sig.get(target, 0)
+            sa = sig.get(va, 0)
+            sb = sig.get(vb, 0)
+            if na: sa = ~sa & MASK64
+            if nb: sb = ~sb & MASK64
+            if st != (sa & sb):
+                return False
+        return True
+
+
 def _verify_resub(aig: AIG, target: int, replacement_lit: int) -> bool:
     """Verify target == replacement_lit by exhaustive/statistical simulation."""
     n = len(aig.inputs)
@@ -264,19 +330,24 @@ def resubstitution(
                                 if gate_hash[k] == target:
                                     continue
                                 new_lit = make_lit(gate_hash[k])
+                                if lit_to_var(new_lit) == target:
+                                    continue
+                                if not _verify_resub(aig, target, new_lit):
+                                    continue
                             elif allow_new_gates:
+                                # Verify BEFORE creating the gate to avoid
+                                # self-referential verification (the bug)
+                                if not _verify_and_resub(aig, target, li, lj):
+                                    continue
                                 new_lit = _make_and_gate(aig, gate_hash, li, lj)
                             else:
                                 continue
 
-                            if lit_to_var(new_lit) == target:
-                                continue
-                            if _verify_resub(aig, target, new_lit):
-                                subs = {make_lit(target): new_lit,
-                                        negate(make_lit(target)): negate(new_lit)}
-                                aig.remap_literals(subs)
-                                changed = found = True
-                                break
+                            subs = {make_lit(target): new_lit,
+                                    negate(make_lit(target)): negate(new_lit)}
+                            aig.remap_literals(subs)
+                            changed = found = True
+                            break
 
             if changed:
                 aig = dead_node_elimination(aig)

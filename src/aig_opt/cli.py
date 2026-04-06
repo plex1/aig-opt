@@ -22,6 +22,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Enable balance-rewrite cycles (slower, reduces depth and breaks convergence)",
     )
     parser.add_argument(
+        "--stochastic",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Multi-restart stochastic optimization with N restarts (0 = off)",
+    )
+    parser.add_argument(
         "--multioutput",
         action="store_true",
         help="Enable multi-output resynthesis (slower, finds cross-output gate sharing)",
@@ -36,7 +43,8 @@ def main(argv: list[str] | None = None) -> None:
     aig = parse_aag(args.input)
     before = aig.num_ands()
 
-    aig = optimize(aig, balance=args.balance, multioutput=args.multioutput)
+    aig = optimize(aig, balance=args.balance, multioutput=args.multioutput,
+                   stochastic=args.stochastic)
     aig.compact()
 
     after = aig.num_ands()

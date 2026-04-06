@@ -309,30 +309,107 @@ BALANCE_PASSES = [
 ]
 
 
+def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bool) -> AIG:
+    """Multi-restart stochastic optimization.
+
+    Runs perturbed rewrite passes with random node ordering and cut selection,
+    interleaved with balance and cleanup. Tracks the best result across restarts.
+    """
+    import random as _random
+    from .rewriter import dag_rewrite
+    from .balance import balance as balance_fn
+
+    # First run the deterministic pipeline to get a baseline
+    base_passes = list(BALANCE_PASSES if balance else DEFAULT_PASSES)
+    if multioutput:
+        base_passes[-3:-3] = [multioutput_resynth_pass]
+    best_aig = aig.copy()
+    for p in base_passes:
+        best_aig = p(best_aig)
+    best_gates = best_aig.num_ands()
+
+    # Prepare: run everything up to (not including) dag_rewrite
+    prep_passes = [
+        constant_propagation, structural_hashing, dead_node_elimination,
+        functional_reduction_pass,
+        constant_propagation, structural_hashing, dead_node_elimination,
+        simple_rewrite,
+        constant_propagation, structural_hashing, dead_node_elimination,
+    ]
+    prepared = aig.copy()
+    for p in prep_passes:
+        prepared = p(prepared)
+
+    cleanup = [constant_propagation, structural_hashing, dead_node_elimination]
+
+    for restart in range(restarts):
+        rng = _random.Random(restart)
+        work = prepared.copy()
+
+        # Multiple rounds of perturbed rewrite + balance
+        for rnd in range(3):
+            perturbation = 0.8 * (0.7 ** rnd)  # anneal: 0.8 -> 0.56 -> 0.39
+            work = dag_rewrite(work, iterations=10, max_cut_size=5,
+                               perturbation=perturbation,
+                               rng=_random.Random(restart * 100 + rnd))
+            for p in cleanup:
+                work = p(work)
+            work = balance_fn(work)
+            for p in cleanup:
+                work = p(work)
+
+        # Deterministic finishing pass
+        work = dag_rewrite(work, iterations=10, max_cut_size=5)
+        work = functional_reduction_pass(work)
+        for p in cleanup:
+            work = p(work)
+
+        if multioutput:
+            work = multioutput_resynth_pass(work)
+            for p in cleanup:
+                work = p(work)
+
+        if work.num_ands() < best_gates:
+            best_gates = work.num_ands()
+            best_aig = work
+
+    return best_aig
+
+
 def optimize(
     aig: AIG,
     passes: list | None = None,
     balance: bool = False,
     multioutput: bool = False,
+    stochastic: int = 0,
 ) -> AIG:
     """Run optimization passes on the AIG.
 
     Args:
         aig: The AIG to optimize (modified in place)
-        passes: Optional list of pass functions. Overrides balance/multioutput flags.
+        passes: Optional list of pass functions. Overrides all flags.
         balance: If True, use balance-rewrite-balance-rewrite cycle (slower,
             helps circuits with deep AND chains).
         multioutput: If True, include multi-output resynthesis pass (slower,
             helps small circuits with few-input output groups).
+        stochastic: Number of random restarts (0 = off). Each restart uses
+            perturbed rewriting with annealing temperature, interleaved with
+            balance passes. Tracks the best result across all restarts.
 
     Returns:
         The optimized AIG
     """
-    if passes is None:
-        passes = list(BALANCE_PASSES if balance else DEFAULT_PASSES)
-        if multioutput:
-            # Insert multioutput pass before final cleanup (last 3 passes)
-            passes[-3:-3] = [multioutput_resynth_pass]
-    for pass_fn in passes:
+    if passes is not None:
+        for pass_fn in passes:
+            aig = pass_fn(aig)
+        return aig
+
+    if stochastic > 0:
+        return _stochastic_optimize(aig, stochastic, balance, multioutput)
+
+    pipeline = list(BALANCE_PASSES if balance else DEFAULT_PASSES)
+    if multioutput:
+        pipeline[-3:-3] = [multioutput_resynth_pass]
+    for pass_fn in pipeline:
         aig = pass_fn(aig)
     return aig

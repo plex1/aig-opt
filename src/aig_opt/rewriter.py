@@ -10,6 +10,8 @@ when a smaller implementation exists (accounting for shared nodes).
 
 from __future__ import annotations
 
+import random
+
 from .aig import (
     AIG,
     CONST_FALSE,
@@ -447,13 +449,30 @@ def _validate_cut(aig: AIG, root_var: int, cut_leaves: frozenset[int]) -> bool:
     return all(leaf in reachable for leaf in cut_leaves)
 
 
-def dag_rewrite(aig: AIG, iterations: int = 10, max_cut_size: int = 5) -> AIG:
+def dag_rewrite(
+    aig: AIG,
+    iterations: int = 10,
+    max_cut_size: int = 5,
+    perturbation: float = 0.0,
+    rng: random.Random | None = None,
+) -> AIG:
     """DAG-aware AIG rewriting.
 
     For each node, enumerates k-feasible cuts, evaluates the truth table,
     resynthesizes, verifies correctness, and replaces if beneficial.
     After each replacement, cuts are recomputed to avoid stale references.
+
+    Args:
+        perturbation: probability [0, 1] of picking a random improving
+            replacement instead of the best one.  Shuffles node order too.
+            Set > 0 for stochastic exploration.
+        rng: random.Random instance (used when perturbation > 0).
     """
+    from .npn import get_optimal_gate_count, synthesize_optimal
+
+    if rng is None:
+        rng = random.Random(42)
+
     for _iter in range(iterations):
         improved = False
 
@@ -466,13 +485,18 @@ def dag_rewrite(aig: AIG, iterations: int = 10, max_cut_size: int = 5) -> AIG:
             key = (min(r0, r1), max(r0, r1))
             hash_table[key] = var
 
-        for var in sorted(list(aig.and_gates.keys())):
+        nodes = list(aig.and_gates.keys())
+        if perturbation > 0:
+            rng.shuffle(nodes)
+        else:
+            nodes.sort()
+
+        for var in nodes:
             if var not in aig.and_gates:
                 continue
 
             node_cuts = all_cuts.get(var, [])
-            best_replacement = None
-            best_saving = 0
+            improving: list[tuple[int, int, dict, int]] = []
 
             for cut in node_cuts:
                 if len(cut) <= 1 or len(cut) > max_cut_size:
@@ -492,7 +516,6 @@ def dag_rewrite(aig: AIG, iterations: int = 10, max_cut_size: int = 5) -> AIG:
                     continue
 
                 # Quick NPN check: can we possibly improve?
-                from .npn import get_optimal_gate_count
                 optimal = get_optimal_gate_count(tt, n)
                 if optimal is not None and optimal >= current_cost:
                     continue  # No possible improvement
@@ -500,38 +523,42 @@ def dag_rewrite(aig: AIG, iterations: int = 10, max_cut_size: int = 5) -> AIG:
                 leaf_lits = [make_lit(v) for v in leaves]
 
                 # Multi-decomposition synthesis (tries all k! variable orderings)
-                from .npn import synthesize_optimal
                 new_lit, new_gates, new_next_var = synthesize_optimal(
                     tt, n, leaf_lits, hash_table, aig.max_var + 1,
                 )
                 new_cost = len(new_gates)
 
                 saving = current_cost - new_cost
-                if saving > best_saving:
+                if saving > 0:
                     # Verify correctness before accepting
                     if verify_synthesis(aig, new_gates, new_lit, tt, leaves):
-                        best_replacement = (new_lit, new_gates, new_next_var)
-                        best_saving = saving
+                        improving.append((saving, new_lit, new_gates, new_next_var))
 
-            if best_replacement is not None:
-                new_lit, new_gates, next_var = best_replacement
+            if not improving:
+                continue
 
-                # Add new gates to the AIG
-                aig.and_gates.update(new_gates)
-                aig.max_var = max(aig.max_var, next_var - 1)
+            # Pick replacement: best or random (with perturbation probability)
+            if len(improving) > 1 and perturbation > 0 and rng.random() < perturbation:
+                _, new_lit, new_gates, next_var = rng.choice(improving)
+            else:
+                _, new_lit, new_gates, next_var = max(improving, key=lambda x: x[0])
 
-                # Substitute old root with new literal
-                old_lit = make_lit(var)
-                if new_lit != old_lit:
-                    subs = {
-                        old_lit: new_lit,
-                        negate(old_lit): negate(new_lit),
-                    }
-                    aig.remap_literals(subs)
+            # Add new gates to the AIG
+            aig.and_gates.update(new_gates)
+            aig.max_var = max(aig.max_var, next_var - 1)
 
-                improved = True
-                # Break to recompute cuts — they're stale after remap
-                break
+            # Substitute old root with new literal
+            old_lit = make_lit(var)
+            if new_lit != old_lit:
+                subs = {
+                    old_lit: new_lit,
+                    negate(old_lit): negate(new_lit),
+                }
+                aig.remap_literals(subs)
+
+            improved = True
+            # Break to recompute cuts — they're stale after remap
+            break
 
         if not improved:
             break

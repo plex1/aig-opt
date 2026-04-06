@@ -2,7 +2,7 @@
 
 A pure Python AIG (And-Inverter Graph) optimizer that reads/writes AIGER ASCII (.aag) files. Implements a full optimization pipeline including simulation-based functional reduction, NPN-guided DAG-aware rewriting, and multi-decomposition synthesis. Benchmarks against Yosys and Berkeley ABC.
 
-See [BENCHMARKS.md](BENCHMARKS.md) for full results. On a suite of 15 circuits, aig-opt **beats Yosys on 12/15** and **matches ABC &deepsyn on 8/15** — in pure Python with no compiled dependencies.
+See [BENCHMARKS.md](BENCHMARKS.md) for full results. On a suite of 17 circuits, aig-opt **beats Yosys on 14/17** and **matches ABC &deepsyn on 9/17** — in pure Python with no compiled dependencies.
 
 ## Optimization Passes
 
@@ -90,20 +90,25 @@ The entire rewrite loop runs for up to 10 iterations, with cuts recomputed after
 
 ## Pipeline Order
 
+Default pipeline:
 ```
 constant_propagation -> structural_hashing -> dead_node_elimination
-    -> functional_reduction (iterative: fraig + cleanup until convergence)
-    -> constant_propagation -> structural_hashing -> dead_node_elimination
-    -> simple_rewrite
-    -> constant_propagation -> structural_hashing -> dead_node_elimination
-    -> [--balance: balance -> cleanup -> rewrite -> balance -> cleanup ->] rewrite
-    -> dag_rewrite (10 iterations, k=5 cuts, NPN + multi-decomposition)
-    -> [--multioutput: multi-output exact synthesis]
     -> functional_reduction (iterative)
-    -> constant_propagation -> structural_hashing -> dead_node_elimination
+    -> simple_rewrite -> cleanup
+    -> dag_rewrite (10 iterations, k=5 cuts, NPN + multi-decomposition)
+    -> functional_reduction (iterative)
+    -> final cleanup
 ```
 
-Steps in `[brackets]` are optional and enabled via CLI flags.
+With `--balance`:
+```
+    ... -> simple_rewrite -> cleanup
+    -> balance -> cleanup -> dag_rewrite
+    -> balance -> cleanup -> dag_rewrite    (second rewrite on balanced structure)
+    -> functional_reduction -> final cleanup
+```
+
+With `--multioutput`, multi-output exact synthesis runs after the last rewrite pass.
 
 Functional reduction runs both early (to reduce the circuit before expensive DAG rewriting) and late (to catch equivalences exposed by rewriting).
 
@@ -166,11 +171,14 @@ src/aig_opt/
   rewriter.py      # DAG-aware rewriting engine (cuts, synthesis, verification)
   npn.py           # NPN canonicalization, precomputed tables, multi-decomposition
   fraig.py         # Simulation-based functional reduction
+  balance.py       # AIG balancing (AND chain -> balanced tree)
+  multioutput.py   # Multi-output exact synthesis
   cli.py           # CLI entry point
 benchmarks/
   benchmark.py     # Three-way comparison: aig-opt vs Yosys vs ABC &deepsyn
-  generate_circuits.py
-  circuits/        # Sample .aag files
+  generate_circuits.py       # Random circuit generator
+  generate_multipliers.py    # 4-bit multiplier generator (unsigned + signed)
+  circuits/        # Sample .aag files (adders, multipliers, random circuits)
 tests/
   test_aiger.py
   test_optimizer.py
@@ -184,7 +192,7 @@ tests/
 
 ## Known Limitations and Future Work
 
-The optimizer matches ABC `&deepsyn` on 8/15 benchmark circuits. The remaining gaps fall into two categories:
+The optimizer matches ABC `&deepsyn` on 9/17 benchmark circuits. The remaining gaps fall into three categories:
 
 ### Cross-output gate sharing is limited to small output groups
 

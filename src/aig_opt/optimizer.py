@@ -242,6 +242,12 @@ def functional_reduction_pass(aig: AIG) -> AIG:
     return aig
 
 
+def balance_pass(aig: AIG) -> AIG:
+    """Balance the AIG by restructuring AND chains into balanced trees."""
+    from .balance import balance
+    return balance(aig)
+
+
 def multioutput_resynth_pass(aig: AIG) -> AIG:
     """Multi-output resynthesis: find gate sharing across outputs."""
     from .multioutput import multioutput_resynth
@@ -262,7 +268,17 @@ DEFAULT_PASSES = [
     constant_propagation,
     structural_hashing,
     dead_node_elimination,
+    # Balance before rewriting (exposes different cut structures)
+    balance_pass,
+    structural_hashing,
+    dead_node_elimination,
     # DAG-aware rewriting
+    dag_rewrite_pass,
+    # Balance after rewriting (minimize depth of rewritten circuit)
+    balance_pass,
+    structural_hashing,
+    dead_node_elimination,
+    # Rewrite again on balanced structure (may find new savings)
     dag_rewrite_pass,
     # Post-rewrite functional reduction (rewriting may expose new equivalences)
     functional_reduction_pass,

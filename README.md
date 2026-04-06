@@ -196,15 +196,15 @@ algebraic(30%) -> perturb(20%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
 
 **Why it's off by default**: each restart takes roughly as long as the default pipeline. With `--stochastic 14`, runtime is ~14x longer. Enable it for high-effort optimization where gate count matters more than runtime.
 
-**Results when enabled** (verified correct): mul4_unsigned 104→96 (standalone optimal config) / 103 (`--stochastic 8`), mul4_signed 106→103, rand_deep_large 10→7. The algebraic decompression was the key breakthrough for the multiplier — it exposes fundamentally different circuit topologies that the compress passes can exploit.
+**Results when enabled** (verified correct): mul4_unsigned 104→**92** (best config: algebraic 0.3, 5 cycles × 3 compress), mul4_signed 106→103, rand_deep_large 10→7. The algebraic decompression was the key breakthrough for the multiplier — it exposes fundamentally different circuit topologies that the compress passes can exploit.
 
 **Empirical tuning**: The decompress/compress ratio was tuned via systematic experiment (`benchmarks/experiment_decompress.py`). Key findings on the 4-bit unsigned multiplier:
 
 | Decompression | Fraction | Compress steps/cycle | Best gates (verified) |
 |---|---|---|---|
-| algebraic | 0.2 | 3 | **96** |
-| algebraic | 0.5 | 2 | 98 |
-| algebraic | 0.3 | 3 | 98 |
+| algebraic | 0.3 | 3 (5 cycles) | **92** |
+| algebraic | 0.15 | 3 (4 cycles + bal) | 93 |
+| algebraic | 0.2 | 3 (3 cycles) | 96 |
 | perturb | 0.2-0.5 | 2-5 | 103-104 |
 
 The sweet spot is light algebraic decompression (20% of gates, +25% size increase) followed by 3 compression steps (rewrite with varied k + resub), repeated for 3 cycles. Heavier decompression explores more but takes longer to compress back; lighter decompression doesn't change enough structure. Algebraic rewrite consistently outperforms subgraph perturbation because it creates structurally meaningful changes (redistributing inputs across gates) rather than random ones.
@@ -293,7 +293,7 @@ In practice, this matters less than expected: the DAG-aware cost model only coun
 
 The optional `--multioutput` pass finds cross-output gate sharing via exhaustive exact synthesis, but it is only tractable for output groups with ≤5 combined inputs. It solves the half_adder (4→3 gates) but cannot help the full_adder (3 inputs but 9 gates requires depth-8 search, too slow in Python) or the multipliers (8 shared inputs per output pair).
 
-**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 default, 96 stochastic vs ABC's 82), mul4_signed (106 default, 103 stochastic vs ABC's 83).
+**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 default, 92 stochastic vs ABC's 82), mul4_signed (106 default, 103 stochastic vs ABC's 83).
 
 **Possible fix**: SAT-based exact synthesis instead of brute-force enumeration, or a C extension for the inner search loop.
 

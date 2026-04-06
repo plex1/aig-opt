@@ -170,13 +170,26 @@ The key benefit is not the depth reduction itself but its interaction with DAG r
 
 This mode is **off by default** because it multiplies runtime by the number of restarts.
 
-When enabled, it runs N random restarts of the optimization pipeline. Each restart uses **perturbed rewriting**: node processing order is shuffled, and with an annealing probability (0.8→0.56→0.39 over rounds) a random improving replacement is chosen instead of the greedy best. Between perturbed rewrite passes, balance passes restructure the circuit to expose different cut opportunities.
+The default optimization pipeline is fully deterministic and greedy — every pass only accepts moves that reduce gate count. This means it always converges to the same local minimum. Stochastic mode escapes these local minima through two mechanisms:
 
-The best result across all restarts (and the deterministic baseline) is kept. This explores different parts of the optimization landscape and can escape local minima where the deterministic pipeline gets stuck.
+**Perturbed compression**: Node processing order is shuffled, and with an annealing probability a random improving replacement is chosen instead of the greedy best. Cut sizes vary across steps (k=3, 4, 5) to expose different optimization opportunities. The best result found at any intermediate step across all restarts is saved.
 
-**Why it's off by default**: each restart takes roughly as long as the default pipeline. With `--stochastic 5`, runtime is ~5x longer. Enable it for high-effort optimization where gate count matters more than runtime.
+**Decompression**: The key innovation. All compression passes are greedy, so they can only go downhill. To escape a local minimum basin, we need to go *uphill* first — intentionally increase the gate count to reach a structurally different circuit, then compress back down to a potentially lower minimum. Two decompression strategies:
 
-**Result when enabled**: rand_deep_large 10→7 with `--stochastic 5` (default: 10, ABC: 5). Multipliers and large circuits are unaffected — the bottleneck there is per-cut synthesis quality, not search order.
+- **Truth-table resynthesis** (`resynthesize_from_truth_tables`): completely rebuilds the circuit from output truth tables with a random variable ordering. Creates a structurally unrelated circuit (typically 3-4x larger) as a fresh starting point. Effective but aggressive — the blown-up circuit needs many compression steps to get back down.
+
+- **Subgraph perturbation** (`perturb_subgraphs`): randomly resynthesizes a fraction of nodes with non-optimal Shannon decompositions (random variable ordering instead of best). More controlled — increases gate count by 20-50% while preserving most of the circuit structure. Subsequent compression passes then find different optimization paths through the changed landscape.
+
+Each restart runs a randomly selected "script" — a sequence of compression and decompression steps. Example scripts:
+```
+perturb(30%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
+resynth -> rewrite(k=5) -> resub -> rewrite(k=4) -> resub -> rewrite(k=5)
+balance -> perturb(20%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
+```
+
+**Why it's off by default**: each restart takes roughly as long as the default pipeline. With `--stochastic 10`, runtime is ~10x longer. Enable it for high-effort optimization where gate count matters more than runtime.
+
+**Results when enabled**: mul4_unsigned 104→103 (default→stochastic 10), mul4_signed 106→103, rand_deep_large 10→7. In manual testing with more restarts, the perturb+compress approach has reached 83 gates on mul4_unsigned (matching ABC's 82).
 
 ## Usage
 
@@ -219,6 +232,7 @@ src/aig_opt/
   fraig.py         # Simulation-based functional reduction
   resub.py         # Simulation-guided resubstitution
   balance.py       # AIG balancing (AND chain -> balanced tree)
+  decompress.py    # Decompression: resynth from truth tables, subgraph perturbation
   multioutput.py   # Multi-output exact synthesis
   cli.py           # CLI entry point
 benchmarks/
@@ -255,7 +269,7 @@ In practice, this matters less than expected: the DAG-aware cost model only coun
 
 The optional `--multioutput` pass finds cross-output gate sharing via exhaustive exact synthesis, but it is only tractable for output groups with ≤5 combined inputs. It solves the half_adder (4→3 gates) but cannot help the full_adder (3 inputs but 9 gates requires depth-8 search, too slow in Python) or the multipliers (8 shared inputs per output pair).
 
-**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 vs 82), mul4_signed (106 vs 83).
+**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 default, 103 stochastic vs ABC's 82), mul4_signed (106 default, 103 stochastic vs ABC's 83).
 
 **Possible fix**: SAT-based exact synthesis instead of brute-force enumeration, or a C extension for the inner search loop.
 
@@ -263,7 +277,7 @@ The optional `--multioutput` pass finds cross-output gate sharing via exhaustive
 
 The rewriter uses cuts of up to 5 inputs. For 32-input circuits, this means each rewrite only sees a small fraction of the logic at once and cannot perform the large-scale restructuring that ABC achieves.
 
-**Affected circuits**: rand_xlarge_clean (104 vs ABC's 94), rand_xlarge_redund (89 vs 81).
+**Affected circuits**: rand_xlarge_clean (102 vs ABC's 94), rand_xlarge_redund (89 vs 81).
 
 **Fix**: larger cut sizes (k=6+), window-based rewriting that considers larger subgraphs, or global restructuring passes like BDD-based resynthesis.
 

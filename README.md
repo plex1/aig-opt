@@ -198,6 +198,17 @@ algebraic(30%) -> perturb(20%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
 
 **Results when enabled** (verified correct): mul4_unsigned 104→98 with `--stochastic 14`, mul4_signed 106→103, rand_deep_large 10→7. The algebraic decompression was the key breakthrough for the multiplier — it exposes fundamentally different circuit topologies that the compress passes can exploit.
 
+**Empirical tuning**: The decompress/compress ratio was tuned via systematic experiment (`benchmarks/experiment_decompress.py`). Key findings on the 4-bit unsigned multiplier:
+
+| Decompression | Fraction | Compress steps/cycle | Best gates |
+|---|---|---|---|
+| algebraic | 0.2 | 3 | **93** |
+| algebraic | 0.5 | 2 | 96 |
+| algebraic | 0.3 | 3 | 98 |
+| perturb | 0.2-0.5 | 2-5 | 103-104 |
+
+The sweet spot is light algebraic decompression (20% of gates, +25% size increase) followed by 3 compression steps (rewrite with varied k + resub), repeated for 3 cycles. Heavier decompression explores more but takes longer to compress back; lighter decompression doesn't change enough structure. Algebraic rewrite consistently outperforms subgraph perturbation because it creates structurally meaningful changes (redistributing inputs across gates) rather than random ones.
+
 ## Usage
 
 ```bash
@@ -221,6 +232,9 @@ python benchmarks/benchmark.py
 
 # Generate random test circuits
 python benchmarks/generate_circuits.py
+
+# Run decompression ratio experiment on a specific circuit
+python benchmarks/experiment_decompress.py benchmarks/circuits/mul4_unsigned.aag
 
 # Run tests
 python -m pytest tests/ -v
@@ -246,6 +260,7 @@ benchmarks/
   benchmark.py     # Three-way comparison: aig-opt vs Yosys vs ABC &deepsyn
   generate_circuits.py       # Random circuit generator
   generate_multipliers.py    # 4-bit multiplier generator (unsigned + signed)
+  experiment_decompress.py   # Decompress/compress ratio experiment
   circuits/        # Sample .aag files (adders, multipliers, random circuits)
 tests/
   test_aiger.py

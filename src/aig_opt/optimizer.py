@@ -326,22 +326,158 @@ BALANCE_PASSES = [
 ]
 
 
-def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bool) -> AIG:
-    """Multi-restart stochastic optimization.
+def _run_one_restart(args: tuple) -> tuple[int, AIG | None]:
+    """Worker function for one stochastic restart. Picklable for multiprocessing.
 
-    Runs random "scripts" — sequences of optimization passes with varied
-    parameters. Tracks the global best circuit after every rewrite/resub
-    step. Includes "decompression" scripts that intentionally perturb
-    the circuit structure (via balance or high-perturbation rewriting)
-    to escape local minima, followed by compression passes.
-
-    The best circuit found at any point across all restarts is kept.
+    Args: (prepared_aig, seed, script, ref_tt, best_so_far)
+    Returns: (best_gate_count, best_aig_or_None)
     """
+    prepared, seed, script, ref_tt, best_so_far = args
+
     import random as _random
     from .rewriter import dag_rewrite
     from .balance import balance as balance_fn
     from .resub import resubstitution
     from .decompress import resynthesize_from_truth_tables, perturb_subgraphs, algebraic_rewrite
+
+    cleanup_fns = [constant_propagation, structural_hashing, dead_node_elimination]
+
+    def do_cleanup(w):
+        for p in cleanup_fns:
+            w = p(w)
+        return w
+
+    best_gates = best_so_far
+    best_aig: AIG | None = None
+
+    def track_best(w):
+        nonlocal best_aig, best_gates
+        n = w.num_ands()
+        if n < best_gates:
+            if ref_tt is not None and w.truth_table() != ref_tt:
+                return
+            best_gates = n
+            best_aig = w.copy()
+
+    work = prepared.copy()
+
+    for step_idx, (step, params) in enumerate(script):
+        default_pert = 0.5 * (0.8 ** step_idx)
+        step_rng = _random.Random(seed * 1000 + step_idx)
+
+        if step == "rw":
+            k = params.get("k", 5)
+            pert = params.get("pert", default_pert)
+            iters = params.get("iters", 15)
+            work = dag_rewrite(work, iterations=iters, max_cut_size=k,
+                               perturbation=pert, rng=step_rng)
+            work = do_cleanup(work)
+            track_best(work)
+        elif step == "resub":
+            work = resubstitution(work, max_resub=1, allow_new_gates=True,
+                                  rng=step_rng)
+            work = do_cleanup(work)
+            track_best(work)
+        elif step == "bal":
+            work = balance_fn(work)
+            work = do_cleanup(work)
+            track_best(work)
+        elif step == "fraig":
+            work = functional_reduction_pass(work)
+            work = do_cleanup(work)
+            track_best(work)
+        elif step == "resynth":
+            work = resynthesize_from_truth_tables(work, rng=step_rng)
+            work = do_cleanup(work)
+        elif step == "perturb":
+            frac = params.get("frac", 0.3)
+            work = perturb_subgraphs(work, fraction=frac, rng=step_rng)
+            work = do_cleanup(work)
+        elif step == "algebraic":
+            frac = params.get("frac", 0.3)
+            work = algebraic_rewrite(work, fraction=frac, rng=step_rng)
+            work = do_cleanup(work)
+
+    # Deterministic finishing pass
+    work = dag_rewrite(work, iterations=15, max_cut_size=5)
+    work = do_cleanup(work)
+    track_best(work)
+    work = resubstitution(work, max_resub=1, allow_new_gates=False)
+    work = do_cleanup(work)
+    track_best(work)
+    work = functional_reduction_pass(work)
+    work = do_cleanup(work)
+    track_best(work)
+
+    return best_gates, best_aig
+
+
+# Script templates for stochastic optimization.
+# Empirically tuned: algebraic(0.3) 5+ cycles x 3 compress = best on multipliers.
+STOCHASTIC_SCRIPTS = [
+    # Best performer: alg(0.3), 7 cycles x 3 compress
+    [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+    # alg(0.15) with balance, 6 cycles
+    [("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
+     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+    # alg(0.2), 6 cycles
+    [("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
+     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+    # Heavier: alg(0.4) tapering to 0.2, 6 cycles
+    [("algebraic", {"frac": 0.4}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.35}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+    # Balance-heavy, 5 cycles
+    [("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+    # Mixed k, 6 cycles
+    [("algebraic", {"frac": 0.3}), ("rw", {"k": 3}), ("rw", {"k": 5}), ("resub", {}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 4}), ("rw", {"k": 5}), ("resub", {}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 3}), ("rw", {"k": 5}), ("resub", {})],
+    # Fraig interleaved, 5 cycles
+    [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {})],
+    # Pure compress baseline
+    [("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}), ("resub", {}),
+     ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
+]
+
+
+def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bool) -> AIG:
+    """Multi-restart stochastic optimization with optional parallelization.
+
+    Runs random "scripts" across multiple restarts, optionally in parallel
+    using multiprocessing. Each restart is independent. The best circuit
+    found at any point across all restarts is kept.
+    """
+    import os
+    import random as _random
 
     # First run the deterministic pipeline to get a baseline
     base_passes = list(BALANCE_PASSES if balance else DEFAULT_PASSES)
@@ -364,142 +500,44 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
     for p in prep_passes:
         prepared = p(prepared)
 
-    cleanup = [constant_propagation, structural_hashing, dead_node_elimination]
-
-    def do_cleanup(w):
-        for p in cleanup:
-            w = p(w)
-        return w
-
     # Compute reference truth table for verification (small circuits only)
     ref_tt = aig.truth_table() if len(aig.inputs) <= 16 else None
 
-    def track_best(w):
-        """Check if w is the best we've seen; verify correctness, then save."""
-        nonlocal best_aig, best_gates
-        n = w.num_ands()
-        if n < best_gates:
-            # Verify correctness before accepting
-            if ref_tt is not None and w.truth_table() != ref_tt:
-                return  # reject incorrect circuit
-            best_gates = n
-            best_aig = w.copy()
+    scripts = STOCHASTIC_SCRIPTS
+    n_scripts = len(scripts)
 
-    # Script templates: lists of (step_type, params_dict)
-    # Empirically tuned via benchmarks/experiment_decompress.py.
-    # Best config: algebraic(0.3), 5 cycles x 3 compress (reached 92 gates on mul4).
-    # Key: varied k per compress step, randomized perturbation per restart.
-    scripts = [
-        # Best performer: alg(0.3), 5 cycles x 3 compress
-        [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Runner up: alg(0.15), 4 cycles x 3 compress with balance
-        [("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-         ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Lighter: alg(0.2), 4 cycles x 3 compress
-        [("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Heavier: alg(0.4), 4 cycles x 3 compress
-        [("algebraic", {"frac": 0.4}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Balance-heavy variant
-        [("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Mix k values aggressively
-        [("algebraic", {"frac": 0.3}), ("rw", {"k": 3}), ("rw", {"k": 5}), ("resub", {}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 4}), ("rw", {"k": 5}), ("resub", {}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Fraig interleaved
-        [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {})],
-        # Pure compress baseline (for diversity)
-        [("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
-    ]
+    # Build restart args: (prepared, seed, script, ref_tt, best_so_far)
+    restart_args = []
+    for i in range(restarts):
+        # Alternate starting from prepared vs best_aig
+        start = prepared if i % 2 == 0 else best_aig
+        script = scripts[i % n_scripts]
+        restart_args.append((start, i, script, ref_tt, best_gates))
 
-    for restart in range(restarts):
-        rng = _random.Random(restart)
+    # Run restarts (parallel if multiple cores available)
+    n_workers = min(restarts, os.cpu_count() or 1)
 
-        # Start from either prepared or best_aig (alternate)
-        work = prepared.copy() if restart % 2 == 0 else best_aig.copy()
+    if n_workers > 1 and restarts > 1:
+        import multiprocessing
+        with multiprocessing.Pool(n_workers) as pool:
+            results = pool.map(_run_one_restart, restart_args)
+    else:
+        results = [_run_one_restart(args) for args in restart_args]
 
-        # Pick a script
-        script = scripts[restart % len(scripts)] if restart < len(scripts) else rng.choice(scripts)
+    # Collect best across all restarts
+    for gates, result_aig in results:
+        if result_aig is not None and gates < best_gates:
+            best_gates = gates
+            best_aig = result_aig
 
-        for step_idx, (step, params) in enumerate(script):
-            default_pert = 0.5 * (0.8 ** step_idx)
-            step_rng = _random.Random(restart * 1000 + step_idx)
-
-            if step == "rw":
-                k = params.get("k", 5)
-                pert = params.get("pert", default_pert)
-                work = dag_rewrite(work, iterations=10, max_cut_size=k,
-                                   perturbation=pert, rng=step_rng)
-                work = do_cleanup(work)
-                track_best(work)
-
-            elif step == "resub":
-                work = resubstitution(work, max_resub=1, allow_new_gates=True,
-                                      rng=step_rng)
-                work = do_cleanup(work)
-                track_best(work)
-
-            elif step == "bal":
-                work = balance_fn(work)
-                work = do_cleanup(work)
-                track_best(work)
-
-            elif step == "fraig":
-                work = functional_reduction_pass(work)
-                work = do_cleanup(work)
-                track_best(work)
-
-            elif step == "resynth":
-                # Decompression: rebuild from truth tables with random ordering
-                work = resynthesize_from_truth_tables(work, rng=step_rng)
-                work = do_cleanup(work)
-                # Don't track_best — this is intentionally larger
-
-            elif step == "perturb":
-                # Decompression: randomly resynthesize subgraphs
-                frac = params.get("frac", 0.3)
-                work = perturb_subgraphs(work, fraction=frac, rng=step_rng)
-                work = do_cleanup(work)
-                # Don't track_best — this is intentionally larger
-
-            elif step == "algebraic":
-                # Decompression: apply algebraic identities
-                frac = params.get("frac", 0.3)
-                work = algebraic_rewrite(work, fraction=frac, rng=step_rng)
-                work = do_cleanup(work)
-                # Don't track_best — this is intentionally larger
-
-        # Deterministic finishing pass on this restart's result
-        work = dag_rewrite(work, iterations=10, max_cut_size=5)
-        work = do_cleanup(work)
-        track_best(work)
-        work = resubstitution(work, max_resub=1, allow_new_gates=False)
-        work = do_cleanup(work)
-        track_best(work)
-        work = functional_reduction_pass(work)
-        work = do_cleanup(work)
-        track_best(work)
-
-        if multioutput:
-            work = multioutput_resynth_pass(work)
-            work = do_cleanup(work)
-            track_best(work)
+    if multioutput:
+        work = multioutput_resynth_pass(best_aig)
+        cleanup = [constant_propagation, structural_hashing, dead_node_elimination]
+        for p in cleanup:
+            work = p(work)
+        if work.num_ands() < best_gates:
+            if ref_tt is None or work.truth_table() == ref_tt:
+                best_aig = work
 
     return best_aig
 

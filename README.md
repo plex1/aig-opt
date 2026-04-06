@@ -174,22 +174,29 @@ The default optimization pipeline is fully deterministic and greedy — every pa
 
 **Perturbed compression**: Node processing order is shuffled, and with an annealing probability a random improving replacement is chosen instead of the greedy best. Cut sizes vary across steps (k=3, 4, 5) to expose different optimization opportunities. The best result found at any intermediate step across all restarts is saved.
 
-**Decompression**: The key innovation. All compression passes are greedy, so they can only go downhill. To escape a local minimum basin, we need to go *uphill* first — intentionally increase the gate count to reach a structurally different circuit, then compress back down to a potentially lower minimum. Two decompression strategies:
+**Decompression**: The key innovation. All compression passes are greedy, so they can only go downhill. To escape a local minimum basin, we need to go *uphill* first — intentionally increase the gate count to reach a structurally different circuit, then compress back down to a potentially lower minimum. Three decompression strategies:
 
-- **Truth-table resynthesis** (`resynthesize_from_truth_tables`): completely rebuilds the circuit from output truth tables with a random variable ordering. Creates a structurally unrelated circuit (typically 3-4x larger) as a fresh starting point. Effective but aggressive — the blown-up circuit needs many compression steps to get back down.
+- **Truth-table resynthesis** (`resynthesize_from_truth_tables`): completely rebuilds the circuit from output truth tables with a random variable ordering. Creates a structurally unrelated circuit (typically 3-4x larger) as a fresh starting point. Most aggressive — the blown-up circuit needs many compression steps to get back down.
 
-- **Subgraph perturbation** (`perturb_subgraphs`): randomly resynthesizes a fraction of nodes with non-optimal Shannon decompositions (random variable ordering instead of best). More controlled — increases gate count by 20-50% while preserving most of the circuit structure. Subsequent compression passes then find different optimization paths through the changed landscape.
+- **Subgraph perturbation** (`perturb_subgraphs`): randomly resynthesizes a fraction of nodes with non-optimal Shannon decompositions (random variable ordering instead of best). Increases gate count by 20-50% while preserving most of the circuit structure.
+
+- **Algebraic rewrite** (`algebraic_rewrite`): applies algebraic identities to randomly selected gates that change circuit topology without changing function. Two transformations:
+  - *Distributive expansion*: `AND(a, OR(b,c)) → OR(AND(a,b), AND(a,c))` — unfactors a shared input, creating two new AND gates. The reverse of the `simple_rewrite` factoring pass.
+  - *Associative reshuffling*: `AND(AND(a,b), AND(c,d)) → AND(AND(a,c), AND(b,d))` — regroups inputs of an AND chain, creating different intermediate signals.
+
+  This is the most effective decompression for arithmetic circuits: it increases gate count by only 25-35% but changes which signals are available for subsequent resubstitution and rewriting.
 
 Each restart runs a randomly selected "script" — a sequence of compression and decompression steps. Example scripts:
 ```
 perturb(30%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
 resynth -> rewrite(k=5) -> resub -> rewrite(k=4) -> resub -> rewrite(k=5)
-balance -> perturb(20%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
+algebraic(30%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
+algebraic(30%) -> perturb(20%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
 ```
 
-**Why it's off by default**: each restart takes roughly as long as the default pipeline. With `--stochastic 10`, runtime is ~10x longer. Enable it for high-effort optimization where gate count matters more than runtime.
+**Why it's off by default**: each restart takes roughly as long as the default pipeline. With `--stochastic 14`, runtime is ~14x longer. Enable it for high-effort optimization where gate count matters more than runtime.
 
-**Results when enabled**: mul4_unsigned 104→103 (default→stochastic 10), mul4_signed 106→103, rand_deep_large 10→7. In manual testing with more restarts, the perturb+compress approach has reached 83 gates on mul4_unsigned (matching ABC's 82).
+**Results when enabled** (verified correct): mul4_unsigned 104→98 with `--stochastic 14`, mul4_signed 106→103, rand_deep_large 10→7. The algebraic decompression was the key breakthrough for the multiplier — it exposes fundamentally different circuit topologies that the compress passes can exploit.
 
 ## Usage
 
@@ -232,7 +239,7 @@ src/aig_opt/
   fraig.py         # Simulation-based functional reduction
   resub.py         # Simulation-guided resubstitution
   balance.py       # AIG balancing (AND chain -> balanced tree)
-  decompress.py    # Decompression: resynth from truth tables, subgraph perturbation
+  decompress.py    # Decompression: resynth, subgraph perturbation, algebraic rewrite
   multioutput.py   # Multi-output exact synthesis
   cli.py           # CLI entry point
 benchmarks/
@@ -269,7 +276,7 @@ In practice, this matters less than expected: the DAG-aware cost model only coun
 
 The optional `--multioutput` pass finds cross-output gate sharing via exhaustive exact synthesis, but it is only tractable for output groups with ≤5 combined inputs. It solves the half_adder (4→3 gates) but cannot help the full_adder (3 inputs but 9 gates requires depth-8 search, too slow in Python) or the multipliers (8 shared inputs per output pair).
 
-**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 default, 103 stochastic vs ABC's 82), mul4_signed (106 default, 103 stochastic vs ABC's 83).
+**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 default, 98 stochastic-14 vs ABC's 82), mul4_signed (106 default, 103 stochastic vs ABC's 83).
 
 **Possible fix**: SAT-based exact synthesis instead of brute-force enumeration, or a C extension for the inner search loop.
 

@@ -264,8 +264,6 @@ DEFAULT_PASSES = [
     dead_node_elimination,
     # DAG-aware rewriting
     dag_rewrite_pass,
-    # Multi-output resynthesis (finds gate sharing across outputs)
-    multioutput_resynth_pass,
     # Post-rewrite functional reduction (rewriting may expose new equivalences)
     functional_reduction_pass,
     # Final cleanup
@@ -274,19 +272,32 @@ DEFAULT_PASSES = [
     dead_node_elimination,
 ]
 
+# Extended pipeline including multi-output resynthesis (opt-in via --multioutput)
+MULTIOUTPUT_PASSES = [
+    *DEFAULT_PASSES[:-3],  # everything up to (not including) final cleanup
+    # Multi-output resynthesis (finds gate sharing across outputs)
+    multioutput_resynth_pass,
+    # Final cleanup
+    constant_propagation,
+    structural_hashing,
+    dead_node_elimination,
+]
 
-def optimize(aig: AIG, passes: list | None = None) -> AIG:
+
+def optimize(aig: AIG, passes: list | None = None, multioutput: bool = False) -> AIG:
     """Run optimization passes on the AIG.
 
     Args:
         aig: The AIG to optimize (modified in place)
         passes: Optional list of pass functions. Uses DEFAULT_PASSES if None.
+        multioutput: If True, include multi-output resynthesis pass (slower,
+            helps small circuits with few-input output groups).
 
     Returns:
         The optimized AIG
     """
     if passes is None:
-        passes = DEFAULT_PASSES
+        passes = MULTIOUTPUT_PASSES if multioutput else DEFAULT_PASSES
     for pass_fn in passes:
         aig = pass_fn(aig)
     return aig

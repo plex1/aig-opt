@@ -103,11 +103,28 @@ constant_propagation -> structural_hashing -> dead_node_elimination
 
 Functional reduction runs both early (to reduce the circuit before expensive DAG rewriting) and late (to catch equivalences exposed by rewriting).
 
+### 7. Multi-Output Exact Synthesis (optional, `--multioutput`)
+
+This pass is **off by default** because it only helps circuits with small output groups (≤5 shared inputs) and adds significant runtime for larger circuits where it cannot find improvements.
+
+When enabled, it groups outputs that share inputs and jointly resynthesizes them. Two strategies are tried:
+
+- **Exhaustive synthesis** (Strategy B): for small groups (≤5 combined inputs, ≤3 outputs), enumerates all possible AND-gate networks bottom-up using iterative-deepening DFS. Each signal carries a precomputed truth table integer, so evaluating a new gate is a single bitwise AND. This finds provably optimal implementations — for example, the 3-gate half adder where `AND(a,b)` serves as both the carry output and part of the XOR computation.
+
+- **Shared-context synthesis** (Strategy A): synthesizes multiple outputs sequentially in a single `SynthesisContext`, so structural hashing naturally reuses gates created for earlier outputs. Tries all output orderings and input permutations.
+
+**Why it's off by default**: the exhaustive search is only tractable for output groups with few combined inputs (≤5). For the 4-bit multipliers (8 shared inputs per output pair), the search space is too large and no improvement is found. The pass adds 0.2-10s per output group examined. Enable it with `--multioutput` when optimizing circuits with small multi-output subcircuits (adders, comparators, small ALUs).
+
+**Result when enabled**: half_adder achieves the optimal 3-gate implementation (vs 4 gates default), matching ABC `&deepsyn`.
+
 ## Usage
 
 ```bash
 # Optimize a circuit
 python -m aig_opt input.aag -o output.aag --stats
+
+# Enable multi-output optimization (slower, finds cross-output gate sharing)
+python -m aig_opt input.aag -o output.aag --multioutput --stats
 
 # Run benchmarks (requires: pip install pyosys)
 python benchmarks/benchmark.py
@@ -149,23 +166,13 @@ tests/
 
 The optimizer matches ABC `&deepsyn` on 8/15 benchmark circuits. The remaining gaps fall into two categories:
 
-### Per-node rewriting cannot discover cross-output gate sharing
+### Cross-output gate sharing is limited to small output groups
 
-The DAG rewriter optimizes one node at a time — it picks a cut around a single node, computes its truth table, and resynthesizes it. It cannot discover gate sharing **across outputs**.
+The optional `--multioutput` pass finds cross-output gate sharing via exhaustive exact synthesis, but it is only tractable for output groups with ≤5 combined inputs. It solves the half_adder (4→3 gates) but cannot help the full_adder (3 inputs but 9 gates requires depth-8 search, too slow in Python) or the multipliers (8 shared inputs per output pair).
 
-Example: the half adder has two outputs (sum = a XOR b, carry = a AND b). Our optimizer synthesizes each independently: 3 AND gates for XOR + 1 for carry = 4 total. But there is a 3-gate implementation that shares a gate:
+**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 vs 82), mul4_signed (106 vs 83).
 
-```
-g1 = a AND b              (this IS the carry)
-g2 = NOT(a) AND NOT(b)    (both inputs low)
-g3 = NOT(g1) AND NOT(g2)  (= XOR: exactly one input high)
-```
-
-Carry = g1, Sum = g3 — three gates, both outputs covered. ABC finds this via SAT-based exact synthesis, which encodes "can these functions be implemented with N AND gates?" as a satisfiability problem that naturally explores cross-output sharing.
-
-**Affected circuits**: full_adder (9 vs ABC's 7), half_adder (4 vs 3).
-
-**Fix**: multi-output exact synthesis for small subcircuits — enumerate all possible gate networks up to a size bound and check if they jointly implement the required output functions.
+**Possible fix**: SAT-based exact synthesis instead of brute-force enumeration, or a C extension for the inner search loop.
 
 ### k=5 cut window is too small for large circuits
 

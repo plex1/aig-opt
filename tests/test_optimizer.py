@@ -268,9 +268,17 @@ class TestMultiOutput:
         """Multi-output optimization should reduce half adder to 3 AND gates."""
         aig = parse_aag(CIRCUITS_DIR / "half_adder.aag")
         original = aig.copy()
-        aig = optimize(aig)
+        aig = optimize(aig, multioutput=True)
         assert truth_tables_match(original, aig)
         assert aig.num_ands() <= 3
+
+    def test_half_adder_default_no_multioutput(self):
+        """Default optimize (no multioutput) should give 4 gates for half adder."""
+        aig = parse_aag(CIRCUITS_DIR / "half_adder.aag")
+        original = aig.copy()
+        aig = optimize(aig)
+        assert truth_tables_match(original, aig)
+        assert aig.num_ands() == 4
 
     def test_exhaustive_finds_shared_xor_and(self):
         """Exhaustive synthesis should find 3-gate solution for (XOR, AND) pair."""

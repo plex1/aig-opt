@@ -17,6 +17,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("input", help="Input .aag file")
     parser.add_argument("-o", "--output", help="Output file (default: stdout)")
     parser.add_argument(
+        "--multioutput",
+        action="store_true",
+        help="Enable multi-output resynthesis (slower, finds cross-output gate sharing)",
+    )
+    parser.add_argument(
         "--stats",
         action="store_true",
         help="Print before/after gate counts to stderr",
@@ -26,7 +31,7 @@ def main(argv: list[str] | None = None) -> None:
     aig = parse_aag(args.input)
     before = aig.num_ands()
 
-    aig = optimize(aig)
+    aig = optimize(aig, multioutput=args.multioutput)
     aig.compact()
 
     after = aig.num_ands()

@@ -200,14 +200,16 @@ algebraic(30%) -> perturb(20%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
 
 **Empirical tuning**: The decompress/compress ratio was tuned via systematic experiment (`benchmarks/experiment_decompress.py`). Key findings on the 4-bit unsigned multiplier:
 
-| Decompression | Fraction | Compress steps/cycle | Best gates |
+| Decompression | Fraction | Compress steps/cycle | Best gates (verified) |
 |---|---|---|---|
-| algebraic | 0.2 | 3 | **93** |
-| algebraic | 0.5 | 2 | 96 |
+| algebraic | 0.2 | 3 | **98** |
+| algebraic | 0.5 | 2 | 98 |
 | algebraic | 0.3 | 3 | 98 |
 | perturb | 0.2-0.5 | 2-5 | 103-104 |
 
 The sweet spot is light algebraic decompression (20% of gates, +25% size increase) followed by 3 compression steps (rewrite with varied k + resub), repeated for 3 cycles. Heavier decompression explores more but takes longer to compress back; lighter decompression doesn't change enough structure. Algebraic rewrite consistently outperforms subgraph perturbation because it creates structurally meaningful changes (redistributing inputs across gates) rather than random ones.
+
+Note: earlier unverified experiments showed lower gate counts (93), but these turned out to be correctness failures from aggressive resub creating invalid circuits. The stochastic optimizer now includes a truth-table verification gate that rejects incorrect intermediates.
 
 ## Usage
 

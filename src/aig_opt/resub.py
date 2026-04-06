@@ -22,7 +22,7 @@ from .aig import (
 MASK64 = 0xFFFFFFFFFFFFFFFF
 
 
-def _simulate_all(aig: AIG, num_rounds: int = 4, seed: int = 42) -> dict[int, list[int]]:
+def _simulate_all(aig: AIG, num_rounds: int = 8, seed: int = 42) -> dict[int, list[int]]:
     """Simulate all nodes, returning var -> list of 64-bit signatures."""
     rng = random.Random(seed)
     gates = aig.topological_sort_gates()
@@ -48,7 +48,6 @@ def _simulate_all(aig: AIG, num_rounds: int = 4, seed: int = 42) -> dict[int, li
 
 
 def _topo_index(aig: AIG) -> dict[int, int]:
-    """Assign topological index to each node."""
     idx = {v: i for i, v in enumerate(aig.inputs)}
     for i, v in enumerate(aig.topological_sort_gates()):
         idx[v] = len(aig.inputs) + i
@@ -115,17 +114,47 @@ def _verify_resub(aig: AIG, target: int, replacement_lit: int) -> bool:
         return True
 
 
-def resubstitution(aig: AIG, max_resub: int = 1) -> AIG:
+def _make_and_gate(aig: AIG, gate_hash: dict, lit0: int, lit1: int) -> int:
+    """Create an AND gate, reusing existing if available."""
+    if lit0 == CONST_FALSE or lit1 == CONST_FALSE:
+        return CONST_FALSE
+    if lit0 == CONST_TRUE:
+        return lit1
+    if lit1 == CONST_TRUE:
+        return lit0
+    if lit0 == lit1:
+        return lit0
+    if lit0 == negate(lit1):
+        return CONST_FALSE
+
+    k = (min(lit0, lit1), max(lit0, lit1))
+    if k in gate_hash:
+        return make_lit(gate_hash[k])
+
+    var = aig.max_var + 1
+    aig.max_var = var
+    aig.and_gates[var] = k
+    gate_hash[k] = var
+    return make_lit(var)
+
+
+def resubstitution(
+    aig: AIG,
+    max_resub: int = 1,
+    allow_new_gates: bool = False,
+    rng: random.Random | None = None,
+) -> AIG:
     """Resubstitution pass.
 
-    For each node, tries to express it as a simple function of other
-    existing nodes using simulation-based candidate filtering:
-      0-resub: target == existing_node (or complement)
-      1-resub: target == AND(d_i, d_j) with possibly negated inputs
+    Args:
+        max_resub: 0 = only node equivalence, 1 = also AND of two divisors.
+        allow_new_gates: If True, 1-resub may create new gates (needs DCE
+            afterward). If False, only reuse existing gates (safe).
+        rng: Random instance for shuffled processing order. None = deterministic.
     """
     from .optimizer import dead_node_elimination, structural_hashing
 
-    for _iteration in range(50):  # safety limit
+    for _iteration in range(50):
         changed = False
 
         sigs = _simulate_all(aig, num_rounds=8)
@@ -133,26 +162,27 @@ def resubstitution(aig: AIG, max_resub: int = 1) -> AIG:
         topo = _topo_index(aig)
         nr = len(sigs.get(0, [0]))
 
-        # Build hash table for existing gates
         gate_hash: dict[tuple[int, int], int] = {}
         for var, (r0, r1) in aig.and_gates.items():
-            key = (min(r0, r1), max(r0, r1))
-            gate_hash[key] = var
+            gate_hash[(min(r0, r1), max(r0, r1))] = var
 
-        # All available signals (inputs + gates), sorted by topo order
         all_vars = sorted(
             list(aig.inputs) + gates,
             key=lambda v: topo.get(v, 0),
         )
 
-        # Precompute signature tuples for fast comparison
         sig_tuples: dict[int, tuple[int, ...]] = {}
         for v in all_vars:
             s = sigs.get(v)
             if s is not None:
                 sig_tuples[v] = tuple(s)
 
-        for target in reversed(gates):
+        # Process order: reversed topo, optionally shuffled
+        targets = [v for v in reversed(gates) if v in aig.and_gates and v in sig_tuples]
+        if rng is not None:
+            rng.shuffle(targets)
+
+        for target in targets:
             if target not in aig.and_gates:
                 continue
 
@@ -161,25 +191,20 @@ def resubstitution(aig: AIG, max_resub: int = 1) -> AIG:
                 continue
 
             target_topo = topo.get(target, 0)
-
-            # Collect divisors: all nodes with smaller topo index
-            # (they don't depend on target, so no cycles)
             divisors = [v for v in all_vars
                         if topo.get(v, 0) < target_topo
                         and v in sig_tuples]
 
-            # --- 0-resub: target == divisor (or complement) ---
+            # --- 0-resub ---
             for d in divisors:
                 dsig = sig_tuples[d]
                 if dsig == tsig:
-                    # Candidate: target == d
                     lit = make_lit(d)
                     if _verify_resub(aig, target, lit):
                         subs = {make_lit(target): lit, negate(make_lit(target)): negate(lit)}
                         aig.remap_literals(subs)
                         changed = True
                         break
-                # Check complement
                 csig = tuple(~s & MASK64 for s in dsig)
                 if csig == tsig:
                     lit = negate(make_lit(d))
@@ -196,8 +221,7 @@ def resubstitution(aig: AIG, max_resub: int = 1) -> AIG:
             if max_resub < 1:
                 continue
 
-            # --- 1-resub: target == AND(lit_i, lit_j) ---
-            # For each pair, check all 4 negation combos via signatures
+            # --- 1-resub ---
             n_div = len(divisors)
             found = False
 
@@ -208,16 +232,18 @@ def resubstitution(aig: AIG, max_resub: int = 1) -> AIG:
                 dsi = sig_tuples[di]
 
                 for j in range(i, n_div):
+                    if found:
+                        break
                     dj = divisors[j]
                     dsj = sig_tuples[dj]
 
-                    # Try all 4 negation combinations of di, dj
                     for ni in range(2):
+                        if found:
+                            break
                         for nj in range(2):
                             si = tuple(~s & MASK64 for s in dsi) if ni else dsi
                             sj = tuple(~s & MASK64 for s in dsj) if nj else dsj
 
-                            # Check: target == AND(si, sj)?
                             match = True
                             for r in range(nr):
                                 if tsig[r] != (si[r] & sj[r]):
@@ -226,40 +252,34 @@ def resubstitution(aig: AIG, max_resub: int = 1) -> AIG:
                             if not match:
                                 continue
 
-                            # Also check complement: target == NAND(si, sj)?
-                            # Actually just check the AND match; NAND would
-                            # be caught by 0-resub + complement
-
-                            # Candidate found — build and verify
                             li = negate(make_lit(di)) if ni else make_lit(di)
                             lj = negate(make_lit(dj)) if nj else make_lit(dj)
 
-                            # Only accept if we can reuse an existing gate
-                            # (creating a new gate for 1-resub is net-zero
-                            # before DCE and can cause regressions)
                             k = (min(li, lj), max(li, lj))
-                            if k not in gate_hash:
+                            if k in gate_hash:
+                                if gate_hash[k] == target:
+                                    continue
+                                new_lit = make_lit(gate_hash[k])
+                            elif allow_new_gates:
+                                new_lit = _make_and_gate(aig, gate_hash, li, lj)
+                            else:
                                 continue
-                            if gate_hash[k] == target:
-                                continue  # would replace target with itself
-                            new_lit = make_lit(gate_hash[k])
 
                             if lit_to_var(new_lit) == target:
-                                continue  # would replace with self
+                                continue
                             if _verify_resub(aig, target, new_lit):
                                 subs = {make_lit(target): new_lit,
                                         negate(make_lit(target)): negate(new_lit)}
                                 aig.remap_literals(subs)
                                 changed = found = True
                                 break
-                        if found:
-                            break
-                    if found:
-                        break
 
             if changed:
                 aig = dead_node_elimination(aig)
                 aig = structural_hashing(aig)
                 break
+
+        if not changed:
+            break
 
     return aig

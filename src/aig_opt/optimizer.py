@@ -320,12 +320,16 @@ BALANCE_PASSES = [
 def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bool) -> AIG:
     """Multi-restart stochastic optimization.
 
-    Runs perturbed rewrite passes with random node ordering and cut selection,
-    interleaved with balance and cleanup. Tracks the best result across restarts.
+    Each restart uses a randomly selected "script" — a different ordering
+    of optimization passes (rewrite, resub, balance, fraig). This explores
+    different parts of the optimization space. Perturbed rewriting uses
+    random node ordering and cut selection. Resub allows new gate creation
+    (safe because we track the best result and discard regressions).
     """
     import random as _random
     from .rewriter import dag_rewrite
     from .balance import balance as balance_fn
+    from .resub import resubstitution
 
     # First run the deterministic pipeline to get a baseline
     base_passes = list(BALANCE_PASSES if balance else DEFAULT_PASSES)
@@ -350,32 +354,52 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
 
     cleanup = [constant_propagation, structural_hashing, dead_node_elimination]
 
+    def do_cleanup(w):
+        for p in cleanup:
+            w = p(w)
+        return w
+
+    # Script templates: different orderings of (rewrite, resub, balance)
+    scripts = [
+        ["rewrite", "resub", "balance", "rewrite", "resub"],
+        ["rewrite", "balance", "resub", "rewrite", "resub"],
+        ["resub", "rewrite", "balance", "rewrite", "resub"],
+        ["balance", "rewrite", "resub", "rewrite", "balance", "resub"],
+        ["rewrite", "resub", "rewrite", "resub", "rewrite"],
+        ["resub", "balance", "rewrite", "resub", "balance", "rewrite"],
+    ]
+
     for restart in range(restarts):
         rng = _random.Random(restart)
         work = prepared.copy()
 
-        # Multiple rounds of perturbed rewrite + balance
-        for rnd in range(3):
-            perturbation = 0.8 * (0.7 ** rnd)  # anneal: 0.8 -> 0.56 -> 0.39
-            work = dag_rewrite(work, iterations=10, max_cut_size=5,
-                               perturbation=perturbation,
-                               rng=_random.Random(restart * 100 + rnd))
-            for p in cleanup:
-                work = p(work)
-            work = balance_fn(work)
-            for p in cleanup:
-                work = p(work)
+        # Pick a random script
+        script = scripts[restart % len(scripts)]
+
+        for step_idx, step in enumerate(script):
+            perturbation = 0.6 * (0.8 ** step_idx)  # anneal over steps
+
+            if step == "rewrite":
+                work = dag_rewrite(work, iterations=10, max_cut_size=5,
+                                   perturbation=perturbation,
+                                   rng=_random.Random(restart * 100 + step_idx))
+            elif step == "resub":
+                work = resubstitution(work, max_resub=1, allow_new_gates=True,
+                                      rng=_random.Random(restart * 200 + step_idx))
+            elif step == "balance":
+                work = balance_fn(work)
+
+            work = do_cleanup(work)
 
         # Deterministic finishing pass
         work = dag_rewrite(work, iterations=10, max_cut_size=5)
+        work = resubstitution(work, max_resub=1, allow_new_gates=False)
         work = functional_reduction_pass(work)
-        for p in cleanup:
-            work = p(work)
+        work = do_cleanup(work)
 
         if multioutput:
             work = multioutput_resynth_pass(work)
-            for p in cleanup:
-                work = p(work)
+            work = do_cleanup(work)
 
         if work.num_ands() < best_gates:
             best_gates = work.num_ands()

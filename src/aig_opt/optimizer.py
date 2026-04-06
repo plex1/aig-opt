@@ -268,17 +268,7 @@ DEFAULT_PASSES = [
     constant_propagation,
     structural_hashing,
     dead_node_elimination,
-    # Balance before rewriting (exposes different cut structures)
-    balance_pass,
-    structural_hashing,
-    dead_node_elimination,
     # DAG-aware rewriting
-    dag_rewrite_pass,
-    # Balance after rewriting (minimize depth of rewritten circuit)
-    balance_pass,
-    structural_hashing,
-    dead_node_elimination,
-    # Rewrite again on balanced structure (may find new savings)
     dag_rewrite_pass,
     # Post-rewrite functional reduction (rewriting may expose new equivalences)
     functional_reduction_pass,
@@ -288,24 +278,50 @@ DEFAULT_PASSES = [
     dead_node_elimination,
 ]
 
-# Extended pipeline including multi-output resynthesis (opt-in via --multioutput)
-MULTIOUTPUT_PASSES = [
-    *DEFAULT_PASSES[:-3],  # everything up to (not including) final cleanup
-    # Multi-output resynthesis (finds gate sharing across outputs)
-    multioutput_resynth_pass,
-    # Final cleanup
+# Extended pipeline with balance-rewrite cycles (opt-in via --balance)
+BALANCE_PASSES = [
+    constant_propagation,
+    structural_hashing,
+    dead_node_elimination,
+    functional_reduction_pass,
+    constant_propagation,
+    structural_hashing,
+    dead_node_elimination,
+    simple_rewrite,
+    constant_propagation,
+    structural_hashing,
+    dead_node_elimination,
+    # Balance before rewriting (exposes different cut structures)
+    balance_pass,
+    structural_hashing,
+    dead_node_elimination,
+    dag_rewrite_pass,
+    # Balance after rewriting (minimize depth of rewritten circuit)
+    balance_pass,
+    structural_hashing,
+    dead_node_elimination,
+    # Rewrite again on balanced structure (may find new savings)
+    dag_rewrite_pass,
+    functional_reduction_pass,
     constant_propagation,
     structural_hashing,
     dead_node_elimination,
 ]
 
 
-def optimize(aig: AIG, passes: list | None = None, multioutput: bool = False) -> AIG:
+def optimize(
+    aig: AIG,
+    passes: list | None = None,
+    balance: bool = False,
+    multioutput: bool = False,
+) -> AIG:
     """Run optimization passes on the AIG.
 
     Args:
         aig: The AIG to optimize (modified in place)
-        passes: Optional list of pass functions. Uses DEFAULT_PASSES if None.
+        passes: Optional list of pass functions. Overrides balance/multioutput flags.
+        balance: If True, use balance-rewrite-balance-rewrite cycle (slower,
+            helps circuits with deep AND chains).
         multioutput: If True, include multi-output resynthesis pass (slower,
             helps small circuits with few-input output groups).
 
@@ -313,7 +329,10 @@ def optimize(aig: AIG, passes: list | None = None, multioutput: bool = False) ->
         The optimized AIG
     """
     if passes is None:
-        passes = MULTIOUTPUT_PASSES if multioutput else DEFAULT_PASSES
+        passes = list(BALANCE_PASSES if balance else DEFAULT_PASSES)
+        if multioutput:
+            # Insert multioutput pass before final cleanup (last 3 passes)
+            passes[-3:-3] = [multioutput_resynth_pass]
     for pass_fn in passes:
         aig = pass_fn(aig)
     return aig

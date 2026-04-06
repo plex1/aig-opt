@@ -96,10 +96,14 @@ constant_propagation -> structural_hashing -> dead_node_elimination
     -> constant_propagation -> structural_hashing -> dead_node_elimination
     -> simple_rewrite
     -> constant_propagation -> structural_hashing -> dead_node_elimination
+    -> [--balance: balance -> cleanup -> rewrite -> balance -> cleanup ->] rewrite
     -> dag_rewrite (10 iterations, k=5 cuts, NPN + multi-decomposition)
+    -> [--multioutput: multi-output exact synthesis]
     -> functional_reduction (iterative)
     -> constant_propagation -> structural_hashing -> dead_node_elimination
 ```
+
+Steps in `[brackets]` are optional and enabled via CLI flags.
 
 Functional reduction runs both early (to reduce the circuit before expensive DAG rewriting) and late (to catch equivalences exposed by rewriting).
 
@@ -117,14 +121,30 @@ When enabled, it groups outputs that share inputs and jointly resynthesizes them
 
 **Result when enabled**: half_adder achieves the optimal 3-gate implementation (vs 4 gates default), matching ABC `&deepsyn`.
 
+### 8. AIG Balancing (optional, `--balance`)
+
+This pass is **off by default** because it doubles runtime for marginal gains on most circuits.
+
+When enabled, it restructures AND chains into balanced binary trees to minimize circuit depth. For example, `((a AND b) AND c) AND d` (depth 3) becomes `(a AND b) AND (c AND d)` (depth 2) with the same number of gates. Leaves are sorted by depth so shallowest are paired first, reducing the critical path.
+
+The key benefit is not the depth reduction itself but its interaction with DAG rewriting: balancing exposes different cut structures, and the pipeline runs `balance -> rewrite -> balance -> rewrite` to break convergence plateaus where rewriting alone gets stuck.
+
+**Why it's off by default**: the extra rewrite pass roughly doubles runtime (e.g., 14s vs 8s on multipliers). Only one benchmark circuit improved: rand_deep_large 10→8 gates. Enable it with `--balance` for circuits with deep AND chains.
+
 ## Usage
 
 ```bash
 # Optimize a circuit
 python -m aig_opt input.aag -o output.aag --stats
 
+# Enable balance-rewrite cycles (slower, breaks convergence on deep circuits)
+python -m aig_opt input.aag -o output.aag --balance --stats
+
 # Enable multi-output optimization (slower, finds cross-output gate sharing)
 python -m aig_opt input.aag -o output.aag --multioutput --stats
+
+# Enable both optional passes
+python -m aig_opt input.aag -o output.aag --balance --multioutput --stats
 
 # Run benchmarks (requires: pip install pyosys)
 python benchmarks/benchmark.py

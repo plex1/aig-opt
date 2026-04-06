@@ -429,8 +429,7 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
             elif step == "bal":
                 work = balance_fn(work)
                 work = do_cleanup(work)
-                # Don't track_best after balance alone — it may inflate
-                # gate count temporarily. Only track after a compress step.
+                track_best(work)
 
             elif step == "fraig":
                 work = functional_reduction_pass(work)

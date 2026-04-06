@@ -242,6 +242,12 @@ def functional_reduction_pass(aig: AIG) -> AIG:
     return aig
 
 
+def resubstitution_pass(aig: AIG) -> AIG:
+    """Simulation-guided resubstitution: express nodes as functions of other existing nodes."""
+    from .resub import resubstitution
+    return resubstitution(aig)
+
+
 def balance_pass(aig: AIG) -> AIG:
     """Balance the AIG by restructuring AND chains into balanced trees."""
     from .balance import balance
@@ -270,6 +276,8 @@ DEFAULT_PASSES = [
     dead_node_elimination,
     # DAG-aware rewriting
     dag_rewrite_pass,
+    # Resubstitution (express nodes as functions of other existing nodes)
+    resubstitution_pass,
     # Post-rewrite functional reduction (rewriting may expose new equivalences)
     functional_reduction_pass,
     # Final cleanup

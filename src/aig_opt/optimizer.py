@@ -341,7 +341,7 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
     from .rewriter import dag_rewrite
     from .balance import balance as balance_fn
     from .resub import resubstitution
-    from .decompress import resynthesize_from_truth_tables, perturb_subgraphs
+    from .decompress import resynthesize_from_truth_tables, perturb_subgraphs, algebraic_rewrite
 
     # First run the deterministic pipeline to get a baseline
     base_passes = list(BALANCE_PASSES if balance else DEFAULT_PASSES)
@@ -399,8 +399,11 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
         [("rw", {"k": 5}), ("rw", {"k": 4}), ("rw", {"k": 3}), ("resub", {}), ("rw", {"k": 5}), ("rw", {"k": 4}), ("resub", {})],
         # Fraig interleaved
         [("rw", {"k": 5}), ("fraig", {}), ("resub", {}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {})],
-        # Heavy decompress: perturb then resynth then compress
-        [("perturb", {"frac": 0.5}), ("resynth", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
+        # Algebraic rewrite decompression
+        [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
+        [("algebraic", {"frac": 0.5}), ("rw", {"k": 4}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+        # Combo: algebraic + perturb
+        [("algebraic", {"frac": 0.3}), ("perturb", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
     ]
 
     for restart in range(restarts):
@@ -450,6 +453,13 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
                 # Decompression: randomly resynthesize subgraphs
                 frac = params.get("frac", 0.3)
                 work = perturb_subgraphs(work, fraction=frac, rng=step_rng)
+                work = do_cleanup(work)
+                # Don't track_best — this is intentionally larger
+
+            elif step == "algebraic":
+                # Decompression: apply algebraic identities
+                frac = params.get("frac", 0.3)
+                work = algebraic_rewrite(work, fraction=frac, rng=step_rng)
                 work = do_cleanup(work)
                 # Don't track_best — this is intentionally larger
 

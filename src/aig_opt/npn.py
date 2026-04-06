@@ -12,7 +12,9 @@ Shannon decomposition.
 
 from __future__ import annotations
 
+import json
 from itertools import permutations
+from pathlib import Path
 
 from .aig import CONST_FALSE, CONST_TRUE, make_lit, negate
 
@@ -175,10 +177,12 @@ def synthesize_optimal(
     existing_hash: dict[tuple[int, int], int],
     next_var: int,
 ) -> tuple[int, dict[int, tuple[int, int]], int]:
-    """Try all num_inputs! decomposition orderings, return the best result.
+    """Synthesize the best AIG for a truth table.
+
+    First tries precomputed exact networks (for k=4), then falls back
+    to trying all k! Shannon decomposition orderings.
 
     Returns (result_lit, new_gates_dict, new_next_var).
-    k=4: 24 trials, k=5: 120 trials — both fast.
     """
     from .rewriter import SynthesisContext, synthesize_tt
 
@@ -187,6 +191,20 @@ def synthesize_optimal(
     best_next_var = next_var
     best_count = float('inf')
 
+    # Try precomputed exact network first (k=4 only)
+    if num_inputs == 4 and _NPN4_NETWORKS:
+        precomp = _try_precomputed_network(tt, num_inputs, leaf_lits, next_var)
+        if precomp is not None:
+            p_lit, p_gates, p_nv = precomp
+            if len(p_gates) < best_count:
+                best_count = len(p_gates)
+                best_lit = p_lit
+                best_gates = p_gates
+                best_next_var = p_nv
+                if best_count == 0:
+                    return best_lit, best_gates, best_next_var
+
+    # Shannon decomposition with all k! variable orderings
     for perm in permutations(range(num_inputs)):
         perm_tt = permute_tt(tt, perm, num_inputs)
         perm_lits = [leaf_lits[perm[i]] for i in range(num_inputs)]
@@ -249,6 +267,155 @@ def _precompute_npn4() -> None:
         _NPN4_OPTIMAL[canon] = _synthesize_and_count(canon, 4)
 
 
+# ---------------------------------------------------------------------------
+# Precomputed exact networks (loaded from npn4_networks.json)
+# ---------------------------------------------------------------------------
+
+# Maps canonical TT -> (gate_list, output_signal) or None if Shannon fallback
+_NPN4_NETWORKS: dict[int, tuple[list[tuple[int, int]], int] | None] = {}
+
+
+def _load_npn4_networks() -> None:
+    """Load precomputed exact networks from JSON."""
+    global _NPN4_NETWORKS
+    json_path = Path(__file__).parent / "npn4_networks.json"
+    if not json_path.exists():
+        return
+    with open(json_path) as f:
+        data = json.load(f)
+    for tt_str, entry in data.items():
+        canon_tt = int(tt_str)
+        if entry["gates"] is not None:
+            gate_list = [tuple(g) for g in entry["gates"]]
+            _NPN4_NETWORKS[canon_tt] = (gate_list, entry["output"])
+            # Also update optimal cost
+            _NPN4_OPTIMAL[canon_tt] = entry["cost"]
+        else:
+            _NPN4_NETWORKS[canon_tt] = None
+            _NPN4_OPTIMAL[canon_tt] = entry["cost"]
+
+
+def _instantiate_network(
+    gate_list: list[tuple[int, int]],
+    output_signal: int,
+    leaf_lits: list[int],
+    next_var: int,
+) -> tuple[int, dict[int, tuple[int, int]], int]:
+    """Instantiate a precomputed network with concrete leaf literals.
+
+    Signal pool layout (matching exhaustive_multioutput_synth):
+      0: const false, 1: const true
+      2+2*i: input i positive, 2+2*i+1: input i negative
+      n_base+2*g: gate g positive, n_base+2*g+1: gate g negative
+    """
+    num_inputs = len(leaf_lits)
+    n_base = 2 + 2 * num_inputs
+
+    # Build signal -> literal mapping
+    sig_to_lit: dict[int, int] = {
+        0: CONST_FALSE,
+        1: CONST_TRUE,
+    }
+    for i, lit in enumerate(leaf_lits):
+        sig_to_lit[2 + 2 * i] = lit
+        sig_to_lit[2 + 2 * i + 1] = negate(lit)
+
+    new_gates: dict[int, tuple[int, int]] = {}
+    for gi, (sa, sb) in enumerate(gate_list):
+        var = next_var
+        next_var += 1
+        lit_a = sig_to_lit[sa]
+        lit_b = sig_to_lit[sb]
+        new_gates[var] = (min(lit_a, lit_b), max(lit_a, lit_b))
+        sig_to_lit[n_base + 2 * gi] = make_lit(var)
+        sig_to_lit[n_base + 2 * gi + 1] = negate(make_lit(var))
+
+    if output_signal >= 0:
+        result_lit = sig_to_lit[output_signal]
+    else:
+        result_lit = negate(sig_to_lit[~output_signal])
+
+    return result_lit, new_gates, next_var
+
+
+def _try_precomputed_network(
+    tt: int,
+    num_inputs: int,
+    leaf_lits: list[int],
+    next_var: int,
+) -> tuple[int, dict[int, tuple[int, int]], int] | None:
+    """Try to use a precomputed exact network for a 4-input truth table.
+
+    Looks up the NPN canonical form, and if an exact network exists,
+    finds the NPN transform that maps the canonical form back to the
+    original truth table, then instantiates the network with transformed
+    leaf literals.
+
+    Returns (result_lit, new_gates, next_var) or None.
+    """
+    if num_inputs != 4:
+        return None
+
+    mask = 0xFFFF
+    tt &= mask
+
+    canon = _NPN4_CANON_MAP.get(tt)
+    if canon is None:
+        return None
+
+    network = _NPN4_NETWORKS.get(canon)
+    if network is None:
+        return None  # Shannon fallback
+
+    gate_list, output_signal = network
+
+    # Find the NPN transform: try all permutations and negations to map
+    # canon -> tt, then apply the inverse to leaf_lits
+    best_result = None
+    best_cost = float('inf')
+
+    for perm in permutations(range(num_inputs)):
+        for neg_mask in range(1 << num_inputs):
+            transformed = permute_tt(canon, perm, num_inputs)
+            for bit in range(num_inputs):
+                if (neg_mask >> bit) & 1:
+                    transformed = _negate_input_fast(transformed, bit, num_inputs)
+
+            if transformed == tt:
+                # Found transform: canon with perm+neg = tt
+                # Apply same transform to leaf literals
+                perm_lits = [leaf_lits[perm[i]] for i in range(num_inputs)]
+                neg_lits = [
+                    negate(perm_lits[i]) if (neg_mask >> i) & 1 else perm_lits[i]
+                    for i in range(num_inputs)
+                ]
+                result_lit, new_gates, nv = _instantiate_network(
+                    gate_list, output_signal, neg_lits, next_var,
+                )
+                if len(new_gates) < best_cost:
+                    best_cost = len(new_gates)
+                    best_result = (result_lit, new_gates, nv)
+                break  # found match for this perm, move on
+
+            if (transformed ^ mask) == tt:
+                # Output-negated match
+                perm_lits = [leaf_lits[perm[i]] for i in range(num_inputs)]
+                neg_lits = [
+                    negate(perm_lits[i]) if (neg_mask >> i) & 1 else perm_lits[i]
+                    for i in range(num_inputs)
+                ]
+                result_lit, new_gates, nv = _instantiate_network(
+                    gate_list, output_signal, neg_lits, next_var,
+                )
+                result_lit = negate(result_lit)
+                if len(new_gates) < best_cost:
+                    best_cost = len(new_gates)
+                    best_result = (result_lit, new_gates, nv)
+                break
+
+    return best_result
+
+
 # k=5 on-the-fly cache
 _NPN5_CACHE: dict[int, int] = {}
 
@@ -293,3 +460,4 @@ def get_optimal_gate_count(tt: int, n: int) -> int | None:
 
 # Precompute k=4 at module import
 _precompute_npn4()
+_load_npn4_networks()

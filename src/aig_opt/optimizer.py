@@ -329,11 +329,13 @@ BALANCE_PASSES = [
 def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bool) -> AIG:
     """Multi-restart stochastic optimization.
 
-    Each restart uses a randomly selected "script" — a different ordering
-    of optimization passes (rewrite, resub, balance, fraig). This explores
-    different parts of the optimization space. Perturbed rewriting uses
-    random node ordering and cut selection. Resub allows new gate creation
-    (safe because we track the best result and discard regressions).
+    Runs random "scripts" — sequences of optimization passes with varied
+    parameters. Tracks the global best circuit after every rewrite/resub
+    step. Includes "decompression" scripts that intentionally perturb
+    the circuit structure (via balance or high-perturbation rewriting)
+    to escape local minima, followed by compression passes.
+
+    The best circuit found at any point across all restarts is kept.
     """
     import random as _random
     from .rewriter import dag_rewrite
@@ -368,58 +370,88 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
             w = p(w)
         return w
 
-    # Script templates: (pass_name, k_override_or_None)
-    # Different orderings of rewrite/resub/balance with varied cut sizes
+    def track_best(w):
+        """Check if w is the best we've seen; if so, save it."""
+        nonlocal best_aig, best_gates
+        n = w.num_ands()
+        if n < best_gates:
+            best_gates = n
+            best_aig = w.copy()
+
+    # Script templates: lists of (step_type, params_dict)
+    # "compress" scripts try to minimize, "decompress" scripts perturb structure
     scripts = [
-        [("rw", 5), ("resub", None), ("bal", None), ("rw", 4), ("resub", None)],
-        [("rw", 4), ("bal", None), ("resub", None), ("rw", 5), ("resub", None)],
-        [("resub", None), ("rw", 5), ("bal", None), ("rw", 3), ("resub", None), ("rw", 5)],
-        [("bal", None), ("rw", 5), ("resub", None), ("rw", 5), ("bal", None), ("resub", None)],
-        [("rw", 3), ("resub", None), ("rw", 5), ("resub", None), ("rw", 4)],
-        [("resub", None), ("bal", None), ("rw", 4), ("resub", None), ("bal", None), ("rw", 5)],
-        [("rw", 5), ("rw", 4), ("resub", None), ("rw", 3), ("resub", None), ("rw", 5)],
-        [("rw", 5), ("resub", None), ("rw", 5), ("resub", None), ("rw", 5), ("resub", None)],
+        # Standard compress sequences with varied k
+        [("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5})],
+        [("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 3}), ("rw", {"k": 5})],
+        [("resub", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
+        # Balance-heavy (decompression then compress)
+        [("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("bal", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5})],
+        [("bal", {}), ("rw", {"k": 3}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+        # Resub-heavy
+        [("resub", {}), ("resub", {}), ("rw", {"k": 5}), ("resub", {}), ("resub", {}), ("rw", {"k": 5})],
+        # High-perturbation decompression followed by deterministic compress
+        [("rw", {"k": 5, "pert": 0.9}), ("rw", {"k": 5, "pert": 0.0}), ("resub", {}), ("rw", {"k": 5, "pert": 0.0})],
+        [("rw", {"k": 4, "pert": 0.9}), ("bal", {}), ("rw", {"k": 5, "pert": 0.0}), ("resub", {}), ("rw", {"k": 5, "pert": 0.0})],
+        # Long compress chain
+        [("rw", {"k": 5}), ("rw", {"k": 4}), ("rw", {"k": 3}), ("resub", {}), ("rw", {"k": 5}), ("rw", {"k": 4}), ("resub", {})],
+        # Fraig interleaved
+        [("rw", {"k": 5}), ("fraig", {}), ("resub", {}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {})],
     ]
 
     for restart in range(restarts):
         rng = _random.Random(restart)
-        work = prepared.copy()
 
-        # Pick a script (cycle through, then random)
-        if restart < len(scripts):
-            script = scripts[restart]
-        else:
-            script = rng.choice(scripts)
+        # Start from either prepared or best_aig (alternate)
+        work = prepared.copy() if restart % 2 == 0 else best_aig.copy()
 
-        for step_idx, (step, k_override) in enumerate(script):
-            perturbation = 0.6 * (0.8 ** step_idx)
-            k = k_override or 5
+        # Pick a script
+        script = scripts[restart % len(scripts)] if restart < len(scripts) else rng.choice(scripts)
+
+        for step_idx, (step, params) in enumerate(script):
+            default_pert = 0.5 * (0.8 ** step_idx)
+            step_rng = _random.Random(restart * 1000 + step_idx)
 
             if step == "rw":
+                k = params.get("k", 5)
+                pert = params.get("pert", default_pert)
                 work = dag_rewrite(work, iterations=10, max_cut_size=k,
-                                   perturbation=perturbation,
-                                   rng=_random.Random(restart * 100 + step_idx))
+                                   perturbation=pert, rng=step_rng)
+                work = do_cleanup(work)
+                track_best(work)
+
             elif step == "resub":
                 work = resubstitution(work, max_resub=1, allow_new_gates=True,
-                                      rng=_random.Random(restart * 200 + step_idx))
+                                      rng=step_rng)
+                work = do_cleanup(work)
+                track_best(work)
+
             elif step == "bal":
                 work = balance_fn(work)
+                work = do_cleanup(work)
+                # Don't track_best after balance alone — it may inflate
+                # gate count temporarily. Only track after a compress step.
 
-            work = do_cleanup(work)
+            elif step == "fraig":
+                work = functional_reduction_pass(work)
+                work = do_cleanup(work)
+                track_best(work)
 
-        # Deterministic finishing pass
+        # Deterministic finishing pass on this restart's result
         work = dag_rewrite(work, iterations=10, max_cut_size=5)
+        work = do_cleanup(work)
+        track_best(work)
         work = resubstitution(work, max_resub=1, allow_new_gates=False)
+        work = do_cleanup(work)
+        track_best(work)
         work = functional_reduction_pass(work)
         work = do_cleanup(work)
+        track_best(work)
 
         if multioutput:
             work = multioutput_resynth_pass(work)
             work = do_cleanup(work)
-
-        if work.num_ands() < best_gates:
-            best_gates = work.num_ands()
-            best_aig = work
+            track_best(work)
 
     return best_aig
 

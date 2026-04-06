@@ -243,9 +243,18 @@ def functional_reduction_pass(aig: AIG) -> AIG:
 
 
 def resubstitution_pass(aig: AIG) -> AIG:
-    """Simulation-guided resubstitution: express nodes as functions of other existing nodes."""
+    """Simulation-guided resubstitution: express nodes as functions of other existing nodes.
+
+    Runs aggressive resub (allows new gate creation) but only keeps the
+    result if it actually reduces gate count.
+    """
     from .resub import resubstitution
-    return resubstitution(aig)
+    before = aig.num_ands()
+    result = resubstitution(aig.copy(), allow_new_gates=True)
+    result = dead_node_elimination(result)
+    if result.num_ands() <= before:
+        return result
+    return aig
 
 
 def balance_pass(aig: AIG) -> AIG:
@@ -359,34 +368,41 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
             w = p(w)
         return w
 
-    # Script templates: different orderings of (rewrite, resub, balance)
+    # Script templates: (pass_name, k_override_or_None)
+    # Different orderings of rewrite/resub/balance with varied cut sizes
     scripts = [
-        ["rewrite", "resub", "balance", "rewrite", "resub"],
-        ["rewrite", "balance", "resub", "rewrite", "resub"],
-        ["resub", "rewrite", "balance", "rewrite", "resub"],
-        ["balance", "rewrite", "resub", "rewrite", "balance", "resub"],
-        ["rewrite", "resub", "rewrite", "resub", "rewrite"],
-        ["resub", "balance", "rewrite", "resub", "balance", "rewrite"],
+        [("rw", 5), ("resub", None), ("bal", None), ("rw", 4), ("resub", None)],
+        [("rw", 4), ("bal", None), ("resub", None), ("rw", 5), ("resub", None)],
+        [("resub", None), ("rw", 5), ("bal", None), ("rw", 3), ("resub", None), ("rw", 5)],
+        [("bal", None), ("rw", 5), ("resub", None), ("rw", 5), ("bal", None), ("resub", None)],
+        [("rw", 3), ("resub", None), ("rw", 5), ("resub", None), ("rw", 4)],
+        [("resub", None), ("bal", None), ("rw", 4), ("resub", None), ("bal", None), ("rw", 5)],
+        [("rw", 5), ("rw", 4), ("resub", None), ("rw", 3), ("resub", None), ("rw", 5)],
+        [("rw", 5), ("resub", None), ("rw", 5), ("resub", None), ("rw", 5), ("resub", None)],
     ]
 
     for restart in range(restarts):
         rng = _random.Random(restart)
         work = prepared.copy()
 
-        # Pick a random script
-        script = scripts[restart % len(scripts)]
+        # Pick a script (cycle through, then random)
+        if restart < len(scripts):
+            script = scripts[restart]
+        else:
+            script = rng.choice(scripts)
 
-        for step_idx, step in enumerate(script):
-            perturbation = 0.6 * (0.8 ** step_idx)  # anneal over steps
+        for step_idx, (step, k_override) in enumerate(script):
+            perturbation = 0.6 * (0.8 ** step_idx)
+            k = k_override or 5
 
-            if step == "rewrite":
-                work = dag_rewrite(work, iterations=10, max_cut_size=5,
+            if step == "rw":
+                work = dag_rewrite(work, iterations=10, max_cut_size=k,
                                    perturbation=perturbation,
                                    rng=_random.Random(restart * 100 + step_idx))
             elif step == "resub":
                 work = resubstitution(work, max_resub=1, allow_new_gates=True,
                                       rng=_random.Random(restart * 200 + step_idx))
-            elif step == "balance":
+            elif step == "bal":
                 work = balance_fn(work)
 
             work = do_cleanup(work)

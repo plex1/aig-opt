@@ -154,7 +154,8 @@ def resubstitution(
     """
     from .optimizer import dead_node_elimination, structural_hashing
 
-    for _iteration in range(50):
+    max_iters = 50 if aig.num_ands() < 200 else 10
+    for _iteration in range(max_iters):
         changed = False
 
         sigs = _simulate_all(aig, num_rounds=8)
@@ -194,6 +195,9 @@ def resubstitution(
             divisors = [v for v in all_vars
                         if topo.get(v, 0) < target_topo
                         and v in sig_tuples]
+            # Cap divisors to keep 1-resub O(D²) tractable
+            if len(divisors) > 100:
+                divisors = divisors[-100:]  # prefer nearby (higher topo) nodes
 
             # --- 0-resub ---
             for d in divisors:

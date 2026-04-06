@@ -74,7 +74,11 @@ The core optimization engine, based on the approach from Mishchenko et al. (DAC 
 
 This reduces the 65,536 possible 4-input functions to just 222 equivalence classes.
 
-**Multi-decomposition synthesis**: For each promising cut, the function is resynthesized using Shannon decomposition. The key insight is that different variable orderings produce different decomposition trees with different gate counts. The engine tries all k! orderings (24 for k=4, 120 for k=5) and picks the one producing fewest AND gates.
+**Synthesis** has two tiers:
+
+1. **Precomputed exact networks** (4-input cuts only): For 24 of the 222 NPN classes, exhaustive enumeration found provably optimal AND-gate networks that are smaller than any Shannon decomposition. These are stored in `npn4_networks.json` and loaded at startup. Some improvements are dramatic: 9→3 gates (4-input XOR), 8→3, 7→4. When a cut's truth table maps to one of these classes (via NPN transform), the precomputed network is instantiated directly.
+
+2. **Multi-decomposition Shannon synthesis** (fallback): For the remaining NPN classes and all 5-input cuts, Shannon decomposition is used. Different variable orderings produce different decomposition trees with different gate counts. The engine tries all k! orderings (24 for k=4, 120 for k=5) and picks the one producing fewest AND gates.
 
 Shannon decomposition expresses any function as:
 
@@ -83,6 +87,8 @@ f = (x AND f|x=1) OR (NOT(x) AND f|x=0)
 ```
 
 where `f|x=1` and `f|x=0` are the positive and negative cofactors. Special cases (constant, single variable, AND, OR, XOR, MUX patterns) are detected and synthesized directly without decomposition.
+
+**Limitation of Shannon decomposition**: It always produces MUX trees — it cannot discover arbitrary gate topologies with reconvergent paths or shared internal fanout. For 198 of the 222 NPN4 classes, Shannon decomposition (across all 24 variable orderings) already produces the optimal result. For the remaining 24 classes, the precomputed exact networks close the gap.
 
 **Verification and replacement**: Each candidate replacement is verified against the original truth table before being accepted. If the new implementation uses fewer AND gates than the existing subgraph (accounting for shared nodes via DAG-aware cost), the replacement is applied.
 
@@ -136,6 +142,18 @@ The key benefit is not the depth reduction itself but its interaction with DAG r
 
 **Why it's off by default**: the extra rewrite pass roughly doubles runtime (e.g., 14s vs 8s on multipliers). Only one benchmark circuit improved: rand_deep_large 10→8 gates. Enable it with `--balance` for circuits with deep AND chains.
 
+### 9. Stochastic Multi-Restart Optimization (optional, `--stochastic N`)
+
+This mode is **off by default** because it multiplies runtime by the number of restarts.
+
+When enabled, it runs N random restarts of the optimization pipeline. Each restart uses **perturbed rewriting**: node processing order is shuffled, and with an annealing probability (0.8→0.56→0.39 over rounds) a random improving replacement is chosen instead of the greedy best. Between perturbed rewrite passes, balance passes restructure the circuit to expose different cut opportunities.
+
+The best result across all restarts (and the deterministic baseline) is kept. This explores different parts of the optimization landscape and can escape local minima where the deterministic pipeline gets stuck.
+
+**Why it's off by default**: each restart takes roughly as long as the default pipeline. With `--stochastic 5`, runtime is ~5x longer. Enable it for high-effort optimization where gate count matters more than runtime.
+
+**Result when enabled**: rand_deep_large 10→7 with `--stochastic 5` (default: 10, ABC: 5). Multipliers and large circuits are unaffected — the bottleneck there is per-cut synthesis quality, not search order.
+
 ## Usage
 
 ```bash
@@ -148,8 +166,11 @@ python -m aig_opt input.aag -o output.aag --balance --stats
 # Enable multi-output optimization (slower, finds cross-output gate sharing)
 python -m aig_opt input.aag -o output.aag --multioutput --stats
 
-# Enable both optional passes
-python -m aig_opt input.aag -o output.aag --balance --multioutput --stats
+# Stochastic multi-restart (high-effort, N restarts)
+python -m aig_opt input.aag -o output.aag --stochastic 5 --stats
+
+# Combine flags for maximum effort
+python -m aig_opt input.aag -o output.aag --balance --multioutput --stochastic 5 --stats
 
 # Run benchmarks (requires: pip install pyosys)
 python benchmarks/benchmark.py
@@ -169,7 +190,8 @@ src/aig_opt/
   aiger.py         # .aag parser and writer
   optimizer.py     # Optimization pass orchestration
   rewriter.py      # DAG-aware rewriting engine (cuts, synthesis, verification)
-  npn.py           # NPN canonicalization, precomputed tables, multi-decomposition
+  npn.py           # NPN canonicalization, precomputed tables, synthesis dispatch
+  npn4_networks.json # Precomputed exact gate networks for 24 NPN4 classes
   fraig.py         # Simulation-based functional reduction
   balance.py       # AIG balancing (AND chain -> balanced tree)
   multioutput.py   # Multi-output exact synthesis
@@ -193,6 +215,16 @@ tests/
 ## Known Limitations and Future Work
 
 The optimizer matches ABC `&deepsyn` on 9/17 benchmark circuits. The remaining gaps fall into three categories:
+
+### Shannon decomposition limits per-cut synthesis quality
+
+The DAG rewriter's synthesis engine uses Shannon decomposition, which always builds MUX trees. It cannot discover arbitrary gate topologies with reconvergent paths or shared internal fanout. For 4-input functions, we mitigate this with precomputed exact networks (stored in `npn4_networks.json`) that cover 24 of 222 NPN classes where Shannon is suboptimal. For 5-input functions, Shannon decomposition remains the only option.
+
+In practice, this matters less than expected: the DAG-aware cost model only counts gates exclusive to a subgraph (gates shared with other fanouts are "free"). On well-optimized circuits, most subgraphs have low exclusive cost that already matches the exact optimum. The precomputed networks provide a theoretical improvement but current benchmarks show no difference because the per-cut exclusive costs are already optimal.
+
+**Affected circuits**: primarily multipliers and arithmetic circuits with dense gate sharing.
+
+**Possible fix**: SAT-based exact synthesis for 5-input functions, or extending the exhaustive precomputation to cover more NPN classes with a C extension for speed.
 
 ### Cross-output gate sharing is limited to small output groups
 

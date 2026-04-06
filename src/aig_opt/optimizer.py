@@ -371,39 +371,51 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
             w = p(w)
         return w
 
+    # Compute reference truth table for verification (small circuits only)
+    ref_tt = aig.truth_table() if len(aig.inputs) <= 16 else None
+
     def track_best(w):
-        """Check if w is the best we've seen; if so, save it."""
+        """Check if w is the best we've seen; verify correctness, then save."""
         nonlocal best_aig, best_gates
         n = w.num_ands()
         if n < best_gates:
+            # Verify correctness before accepting
+            if ref_tt is not None and w.truth_table() != ref_tt:
+                return  # reject incorrect circuit
             best_gates = n
             best_aig = w.copy()
 
     # Script templates: lists of (step_type, params_dict)
-    # "compress" steps reduce gates, "decompress" steps restructure (may increase)
+    # Empirically tuned: algebraic(0.2) + 3 compress steps per cycle is optimal.
+    # Light decompression (+25% gates) followed by rewrite+resub compression
+    # finds fundamentally different structures. Multiple cycles accumulate gains.
     scripts = [
-        # Standard compress
-        [("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5})],
-        [("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 3}), ("rw", {"k": 5})],
-        [("resub", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
-        # Decompress then compress: full resynth from truth tables
-        [("resynth", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5})],
-        [("resynth", {}), ("resub", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Decompress then compress: perturb random subgraphs
-        [("perturb", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
-        [("perturb", {"frac": 0.5}), ("rw", {"k": 4}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Balance + decompress combos
-        [("bal", {}), ("perturb", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
-        [("resynth", {}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Deep compress chain
-        [("rw", {"k": 5}), ("rw", {"k": 4}), ("rw", {"k": 3}), ("resub", {}), ("rw", {"k": 5}), ("rw", {"k": 4}), ("resub", {})],
+        # Best performer: algebraic(0.2), 3 compress steps, 3 cycles
+        [("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+        # Variant: algebraic(0.2) with different k sequence
+        [("algebraic", {"frac": 0.2}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 3}), ("rw", {"k": 5}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+        # Algebraic(0.3) — slightly more aggressive
+        [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+         ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+        # Algebraic(0.5) — heavy decompress for more exploration
+        [("algebraic", {"frac": 0.5}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+        # Mix: algebraic + balance
+        [("algebraic", {"frac": 0.2}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+        # Mix: algebraic + perturb
+        [("algebraic", {"frac": 0.2}), ("perturb", {"frac": 0.15}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
+        # Pure compress (baseline for comparison)
+        [("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
         # Fraig interleaved
-        [("rw", {"k": 5}), ("fraig", {}), ("resub", {}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {})],
-        # Algebraic rewrite decompression
-        [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
-        [("algebraic", {"frac": 0.5}), ("rw", {"k": 4}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-        # Combo: algebraic + perturb
-        [("algebraic", {"frac": 0.3}), ("perturb", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
+        [("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {}),
+         ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
     ]
 
     for restart in range(restarts):

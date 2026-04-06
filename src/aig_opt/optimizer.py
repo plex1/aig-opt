@@ -412,61 +412,39 @@ def _run_one_restart(args: tuple) -> tuple[int, AIG | None]:
     return best_gates, best_aig
 
 
-# Script templates for stochastic optimization.
-# Empirically tuned: algebraic(0.3) 5+ cycles x 3 compress = best on multipliers.
-STOCHASTIC_SCRIPTS = [
-    # Best performer: alg(0.3), 7 cycles x 3 compress
-    [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-    # alg(0.15) with balance, 6 cycles
-    [("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.15}), ("bal", {}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-    # alg(0.2), 6 cycles
-    [("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-    # Heavier: alg(0.4) tapering to 0.2, 6 cycles
-    [("algebraic", {"frac": 0.4}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.35}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.2}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-    # Balance-heavy, 5 cycles
-    [("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("bal", {}), ("algebraic", {"frac": 0.25}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5})],
-    # Mixed k, 6 cycles
-    [("algebraic", {"frac": 0.3}), ("rw", {"k": 3}), ("rw", {"k": 5}), ("resub", {}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 4}), ("rw", {"k": 5}), ("resub", {}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 3}), ("rw", {"k": 5}), ("resub", {})],
-    # Fraig interleaved, 5 cycles
-    [("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 5}),
-     ("algebraic", {"frac": 0.3}), ("rw", {"k": 5}), ("fraig", {}), ("resub", {})],
-    # Pure compress baseline
-    [("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}), ("resub", {}),
-     ("rw", {"k": 5}), ("resub", {}), ("rw", {"k": 4}), ("resub", {}), ("rw", {"k": 5}), ("resub", {})],
-]
+def _generate_script(seed: int) -> list[tuple[str, dict]]:
+    """Generate a random decompress-compress script from a seed.
+
+    Each script has 5-8 cycles of: algebraic decompress + 2-3 compress steps.
+    Parameters (k, perturbation, frac, use_balance) are randomized per seed,
+    giving every restart a unique trajectory through the optimization space.
+    """
+    import random as _random
+    rng = _random.Random(seed)
+
+    n_cycles = rng.randint(5, 8)
+    n_compress = rng.choice([2, 3, 3, 3])  # favor 3
+    frac = rng.choice([0.15, 0.2, 0.25, 0.3, 0.3, 0.3, 0.35, 0.4])
+    use_balance = rng.random() < 0.25
+
+    script: list[tuple[str, dict]] = []
+    for cycle in range(n_cycles):
+        # Decompress
+        script.append(("algebraic", {"frac": frac}))
+        if use_balance:
+            script.append(("bal", {}))
+        # Compress
+        for ci in range(n_compress):
+            k = rng.choice([3, 4, 5, 5, 5])  # favor k=5
+            pert = rng.uniform(0.1, 0.5)
+            script.append(("rw", {"k": k, "pert": pert}))
+            if ci == 0 or rng.random() < 0.7:
+                script.append(("resub", {}))
+        # Occasionally add fraig
+        if rng.random() < 0.15:
+            script.append(("fraig", {}))
+
+    return script
 
 
 def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bool) -> AIG:
@@ -503,15 +481,11 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
     # Compute reference truth table for verification (small circuits only)
     ref_tt = aig.truth_table() if len(aig.inputs) <= 16 else None
 
-    scripts = STOCHASTIC_SCRIPTS
-    n_scripts = len(scripts)
-
-    # Build restart args: (prepared, seed, script, ref_tt, best_so_far)
+    # Build restart args: each gets a unique generated script
     restart_args = []
     for i in range(restarts):
-        # Alternate starting from prepared vs best_aig
         start = prepared if i % 2 == 0 else best_aig
-        script = scripts[i % n_scripts]
+        script = _generate_script(i)
         restart_args.append((start, i, script, ref_tt, best_gates))
 
     # Run restarts (parallel if multiple cores available)

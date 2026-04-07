@@ -29,6 +29,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Multi-restart stochastic optimization with N restarts (0 = off)",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="W",
+        help="Number of parallel workers for stochastic mode (default: min(N, cpu_count))",
+    )
+    parser.add_argument(
         "--multioutput",
         action="store_true",
         help="Enable multi-output resynthesis (slower, finds cross-output gate sharing)",
@@ -44,7 +51,7 @@ def main(argv: list[str] | None = None) -> None:
     before = aig.num_ands()
 
     aig = optimize(aig, balance=args.balance, multioutput=args.multioutput,
-                   stochastic=args.stochastic)
+                   stochastic=args.stochastic, workers=args.workers)
     aig.compact()
 
     after = aig.num_ands()

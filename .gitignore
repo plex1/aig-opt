@@ -4,3 +4,5 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+*.aag
+!benchmarks/circuits/*.aag

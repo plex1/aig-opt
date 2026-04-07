@@ -447,7 +447,7 @@ def _generate_script(seed: int) -> list[tuple[str, dict]]:
     return script
 
 
-def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bool) -> AIG:
+def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bool, workers: int | None = None) -> AIG:
     """Multi-restart stochastic optimization with optional parallelization.
 
     Runs random "scripts" across multiple restarts, optionally in parallel
@@ -489,7 +489,7 @@ def _stochastic_optimize(aig: AIG, restarts: int, balance: bool, multioutput: bo
         restart_args.append((start, i, script, ref_tt, best_gates))
 
     # Run restarts (parallel if multiple cores available)
-    n_workers = min(restarts, os.cpu_count() or 1)
+    n_workers = workers if workers is not None else min(restarts, os.cpu_count() or 1)
 
     if n_workers > 1 and restarts > 1:
         import multiprocessing
@@ -522,6 +522,7 @@ def optimize(
     balance: bool = False,
     multioutput: bool = False,
     stochastic: int = 0,
+    workers: int | None = None,
 ) -> AIG:
     """Run optimization passes on the AIG.
 
@@ -545,7 +546,7 @@ def optimize(
         return aig
 
     if stochastic > 0:
-        return _stochastic_optimize(aig, stochastic, balance, multioutput)
+        return _stochastic_optimize(aig, stochastic, balance, multioutput, workers=workers)
 
     pipeline = list(BALANCE_PASSES if balance else DEFAULT_PASSES)
     if multioutput:

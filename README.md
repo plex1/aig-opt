@@ -56,7 +56,29 @@ python benchmarks/benchmark.py
 
 See [Usage](#usage) below for all CLI flags and options.
 
-## Optimization Passes
+## Overview
+
+### Optimization Passes
+
+- [Constant propagation](#1-constant-propagation) (`src/aig_opt/optimizer.py`): Simplifies trivial patterns (`0 AND x`, `x AND x`, `x AND !x`)
+- [Structural hashing](#2-structural-hashing) (`src/aig_opt/optimizer.py`): Merges duplicate AND gates with identical inputs
+- [Dead node elimination](#3-dead-node-elimination) (`src/aig_opt/optimizer.py`): Removes unreachable gates
+- [Simple rewriting](#4-simple-rewriting) (`src/aig_opt/optimizer.py`): Local two-level algebraic factoring of shared inputs
+- [Simulation-based functional reduction](#5-simulation-based-functional-reduction-fraig-sweeping) (`src/aig_opt/fraig.py`): Detects functionally equivalent nodes via random simulation and exhaustive verification
+- [DAG-aware rewriting](#6-dag-aware-rewriting-with-npn-guided-multi-decomposition) (`src/aig_opt/rewriter.py`): Enumerates k-feasible cuts, computes truth tables, and resynthesizes optimal implementations using NPN canonicalization
+- [Resubstitution](#7-resubstitution) (`src/aig_opt/resub.py`): Replaces gates with simpler combinations of existing nodes
+- [Multi-output exact synthesis](#8-multi-output-exact-synthesis-optional---multioutput) (`src/aig_opt/multioutput.py`): Groups outputs by shared inputs for joint resynthesis *(optional)*
+- [AIG balancing](#9-aig-balancing-optional---balance) (`src/aig_opt/balance.py`): Restructures AND chains into balanced trees to reduce depth *(optional)*
+- [Decompression](#10-decompression) (`src/aig_opt/decompress.py`): Intentionally restructures circuits to escape local minima *(used in stochastic mode)*
+- [Stochastic multi-restart optimization](#11-stochastic-multi-restart-optimization-optional---stochastic-n) (`src/aig_opt/optimizer.py`): Parallel randomized decompress-compress cycles *(optional)*
+
+### Advanced Techniques
+
+- [NPN canonicalization](#6-dag-aware-rewriting-with-npn-guided-multi-decomposition) (`src/aig_opt/npn.py`): Groups Boolean functions by NPN equivalence with precomputed optimal gate counts for k=4 and k=5
+- [Multi-decomposition synthesis](#6-dag-aware-rewriting-with-npn-guided-multi-decomposition) (`src/aig_opt/rewriter.py`): Tries all k! variable orderings for Shannon decomposition to find the smallest implementation
+- [Precomputed networks](#6-dag-aware-rewriting-with-npn-guided-multi-decomposition) (`src/aig_opt/npn4_networks.json`): Provably optimal AND-gate implementations for all 222 NPN classes of 4-input functions
+
+## Optimization Passes (Detail)
 
 The optimizer runs a pipeline of passes, each targeting a different class of redundancy. Passes are applied in a specific order and repeated where beneficial.
 
@@ -146,7 +168,7 @@ where `f|x=1` and `f|x=0` are the positive and negative cofactors. Special cases
 
 The entire rewrite loop runs for up to 10 iterations, with cuts recomputed after each pass of replacements.
 
-### Resubstitution (planned)
+### 7. Resubstitution
 
 Resubstitution is a fundamentally different optimization from cut-based rewriting. Where rewriting asks "can I build a better circuit for this function from primary inputs?", resubstitution asks "can I express this node as a simple function of **other existing nodes** already in the circuit?"
 
@@ -194,7 +216,7 @@ With `--multioutput`, multi-output exact synthesis runs after the last rewrite p
 
 Functional reduction runs both early (to reduce the circuit before expensive DAG rewriting) and late (to catch equivalences exposed by rewriting).
 
-### 7. Multi-Output Exact Synthesis (optional, `--multioutput`)
+### 8. Multi-Output Exact Synthesis (optional, `--multioutput`)
 
 This pass is **off by default** because it only helps circuits with small output groups (≤5 shared inputs) and adds significant runtime for larger circuits where it cannot find improvements.
 
@@ -208,7 +230,7 @@ When enabled, it groups outputs that share inputs and jointly resynthesizes them
 
 **Result when enabled**: half_adder achieves the optimal 3-gate implementation (vs 4 gates default), matching ABC `&deepsyn`.
 
-### 8. AIG Balancing (optional, `--balance`)
+### 9. AIG Balancing (optional, `--balance`)
 
 This pass is **off by default** because it doubles runtime for marginal gains on most circuits.
 
@@ -218,15 +240,9 @@ The key benefit is not the depth reduction itself but its interaction with DAG r
 
 **Why it's off by default**: the extra rewrite pass roughly doubles runtime (e.g., 14s vs 8s on multipliers). Only one benchmark circuit improved: rand_deep_large 10→8 gates. Enable it with `--balance` for circuits with deep AND chains.
 
-### 9. Stochastic Multi-Restart Optimization (optional, `--stochastic N`)
+### 10. Decompression
 
-This mode is **off by default** because it multiplies runtime by the number of restarts.
-
-The default optimization pipeline is fully deterministic and greedy — every pass only accepts moves that reduce gate count. This means it always converges to the same local minimum. Stochastic mode escapes these local minima through two mechanisms:
-
-**Perturbed compression**: Node processing order is shuffled, and with an annealing probability a random improving replacement is chosen instead of the greedy best. Cut sizes vary across steps (k=3, 4, 5) to expose different optimization opportunities. The best result found at any intermediate step across all restarts is saved.
-
-**Decompression**: The key innovation. All compression passes are greedy, so they can only go downhill. To escape a local minimum basin, we need to go *uphill* first — intentionally increase the gate count to reach a structurally different circuit, then compress back down to a potentially lower minimum. Three decompression strategies:
+All compression passes (rewriting, resubstitution, FRAIG) are greedy — they only accept moves that reduce gate count. This means they always converge to the same local minimum. To escape, we need to go *uphill* first — intentionally increase the gate count to reach a structurally different circuit, then compress back down to a potentially lower minimum. Three decompression strategies are implemented in `src/aig_opt/decompress.py`:
 
 - **Truth-table resynthesis** (`resynthesize_from_truth_tables`): completely rebuilds the circuit from output truth tables with a random variable ordering. Creates a structurally unrelated circuit (typically 3-4x larger) as a fresh starting point. Most aggressive — the blown-up circuit needs many compression steps to get back down.
 
@@ -237,6 +253,16 @@ The default optimization pipeline is fully deterministic and greedy — every pa
   - *Associative reshuffling*: `AND(AND(a,b), AND(c,d)) → AND(AND(a,c), AND(b,d))` — regroups inputs of an AND chain, creating different intermediate signals.
 
   This is the most effective decompression for arithmetic circuits: it increases gate count by only 25-35% but changes which signals are available for subsequent resubstitution and rewriting.
+
+These passes are not used standalone — they are building blocks for the [stochastic multi-restart optimizer](#11-stochastic-multi-restart-optimization-optional---stochastic-n), which alternates decompression with compression in randomized scripts.
+
+### 11. Stochastic Multi-Restart Optimization (optional, `--stochastic N`)
+
+This mode is **off by default** because it multiplies runtime by the number of restarts.
+
+The default optimization pipeline is fully deterministic and greedy — every pass only accepts moves that reduce gate count. This means it always converges to the same local minimum. Stochastic mode escapes these local minima by alternating [decompression](#10-decompression) with compression in randomized scripts across multiple parallel restarts.
+
+**Perturbed compression**: Node processing order is shuffled, and with an annealing probability a random improving replacement is chosen instead of the greedy best. Cut sizes vary across steps (k=3, 4, 5) to expose different optimization opportunities. The best result found at any intermediate step across all restarts is saved.
 
 **Parallel execution**: Restarts are fully independent and run in parallel across all available CPU cores using `multiprocessing.Pool`. With 4 cores, `--stochastic 16` takes roughly the same wall time as 4 sequential restarts. The parallelization is automatic — no configuration needed.
 

@@ -4,6 +4,58 @@ A pure Python AIG (And-Inverter Graph) optimizer that reads/writes AIGER ASCII (
 
 See [BENCHMARKS.md](BENCHMARKS.md) for full results. On a suite of 17 circuits, aig-opt **beats Yosys on 14/17** and **matches ABC &deepsyn on 9/17** — in pure Python with no compiled dependencies.
 
+## Getting Started
+
+### Prerequisites
+
+- Python >= 3.10
+
+### Clone and install
+
+```bash
+git clone https://github.com/plex1/testrepo.git
+cd testrepo
+```
+
+**Option A: using uv (recommended)**
+
+```bash
+uv venv && source .venv/bin/activate
+uv pip install -e .
+uv pip install pytest          # for tests
+uv pip install pyosys          # optional, for Yosys/ABC benchmarks
+```
+
+**Option B: using pip**
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+pip install pytest             # for tests
+pip install pyosys             # optional, for Yosys/ABC benchmarks
+```
+
+### Quick examples
+
+```bash
+# Optimize a circuit and print statistics
+python -m aig_opt benchmarks/circuits/half_adder.aag --stats
+
+# Optimize and write output to a file
+python -m aig_opt benchmarks/circuits/mul4_unsigned.aag -o optimized.aag --stats
+
+# Stochastic multi-restart (auto-parallelized across all CPU cores)
+python -m aig_opt benchmarks/circuits/mul4_unsigned.aag --stochastic 16 --stats
+
+# Run the test suite
+python -m pytest tests/ -v
+
+# Run three-way benchmarks against Yosys and ABC (requires pyosys)
+python benchmarks/benchmark.py
+```
+
+See [Usage](#usage) below for all CLI flags and options.
+
 ## Optimization Passes
 
 The optimizer runs a pipeline of passes, each targeting a different class of redundancy. Passes are applied in a specific order and repeated where beneficial.

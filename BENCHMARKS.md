@@ -33,6 +33,23 @@ Gate counts represent the number of AND gates in the AIG. Lower is better.
 
 Results use the default pipeline. Optional `--balance` and `--multioutput` flags can improve specific circuits (e.g., `--balance` reduces rand_deep_large to 8, `--multioutput` reduces half_adder to 3).
 
+## Stochastic Optimization Results (`--stochastic`)
+
+The stochastic multi-restart mode (`--stochastic N`) escapes local minima through algebraic decompression followed by compression. Restarts run in parallel across all CPU cores. Results below use 16 restarts on 4 cores.
+
+| Circuit | Default | Stochastic-16 | ABC &deepsyn | Time (stochastic) | Notes |
+|---|---:|---:|---:|---:|---|
+| mul4_unsigned.aag | 104 | **92** | 82 | ~210s | Algebraic decompression (frac=0.3), 5-7 cycles |
+| mul4_signed.aag | 106 | **103** | 83 | ~220s | |
+| rand_deep_large.aag | 10 | **7** | 5 | ~30s | |
+| half_adder.aag | 4 | 4 | 3 | ~5s | Use `--multioutput` for 3 |
+| full_adder.aag | 9 | 9 | 7 | ~10s | Exact synthesis needed |
+| rand_xlarge_clean.aag | 104 | 102 | 94 | ~300s | k=5 window too small |
+
+**Bold** = improvement over the default pipeline.
+
+The biggest win is on the multipliers: mul4_unsigned drops from 104 to **92** (11.5% reduction), closing the gap with ABC from 22 gates to 10. Stochastic mode has diminishing returns on circuits that are already well-optimized by the default pipeline (e.g., rand_small, rand_med).
+
 ## Summary
 
 - **aig-opt beats Yosys on 14 of 17 circuits** (ties on 3)

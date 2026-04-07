@@ -186,28 +186,50 @@ The default optimization pipeline is fully deterministic and greedy — every pa
 
   This is the most effective decompression for arithmetic circuits: it increases gate count by only 25-35% but changes which signals are available for subsequent resubstitution and rewriting.
 
-Each restart runs a randomly selected "script" — a sequence of compression and decompression steps. Example scripts:
+**Parallel execution**: Restarts are fully independent and run in parallel across all available CPU cores using `multiprocessing.Pool`. With 4 cores, `--stochastic 16` takes roughly the same wall time as 4 sequential restarts. The parallelization is automatic — no configuration needed.
+
+**Randomized scripts**: Each restart generates a unique "script" — a sequence of compression and decompression steps — from its seed via `_generate_script()`. Parameters are randomized per restart:
+
 ```
-perturb(30%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
-resynth -> rewrite(k=5) -> resub -> rewrite(k=4) -> resub -> rewrite(k=5)
-algebraic(30%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
-algebraic(30%) -> perturb(20%) -> rewrite(k=5) -> resub -> rewrite(k=5) -> resub
+# Example generated scripts (each restart is different):
+algebraic(0.3) -> rw(k=5,p=0.32) -> resub -> rw(k=4,p=0.18) -> algebraic(0.3) -> ...  (7 cycles)
+algebraic(0.15) -> bal -> rw(k=5,p=0.41) -> resub -> rw(k=5,p=0.27) -> resub -> ...   (6 cycles)
+algebraic(0.4) -> rw(k=3,p=0.15) -> resub -> rw(k=5,p=0.44) -> fraig -> ...            (5 cycles)
 ```
 
-**Why it's off by default**: each restart takes roughly as long as the default pipeline. With `--stochastic 14`, runtime is ~14x longer. Enable it for high-effort optimization where gate count matters more than runtime.
+#### Search Parameters
 
-**Results when enabled** (verified correct): mul4_unsigned 104→**92** (best config: algebraic 0.3, 5 cycles × 3 compress), mul4_signed 106→103, rand_deep_large 10→7. The algebraic decompression was the key breakthrough for the multiplier — it exposes fundamentally different circuit topologies that the compress passes can exploit.
+The following parameters control search quality. All are randomized per restart to maximize trajectory diversity:
+
+| Parameter | Range | Effect | Notes |
+|---|---|---|---|
+| `restarts` (N in --stochastic N) | User-specified | Number of independent attempts, run in parallel | Key knob — more restarts = more trajectory diversity |
+| `n_cycles` | 5-8 per restart | Decompress-compress rounds per script | More cycles = more chances to find improvements |
+| `n_compress` | 2-3 per cycle | Compression steps per cycle (rw + resub) | 3 is favored; more = more thorough compression |
+| `algebraic frac` | 0.15-0.4 | Fraction of gates perturbed per decompression | 0.3 is most common; higher = more exploration, slower convergence |
+| `max_cut_size` (k) | 3, 4, or 5 | Rewrite window size, randomized per step | k=5 favored; smaller k finds different optimizations |
+| `perturbation` | 0.1-0.5 | Probability of choosing a random (not greedy-best) replacement | Anneals down over steps within a script |
+| `dag_rewrite iterations` | 15 | Replacements per rewrite call | Higher than default (10) for more thorough compression |
+| `use_balance` | 25% chance per restart | Whether to interleave balance passes | Helps deep AND chains; adds overhead |
+| `fraig` | 15% chance per cycle | Whether to add functional reduction | Catches equivalences exposed by decompression |
+| `max_resub` | 1 | Resubstitution complexity (0=equiv, 1=AND pair) | Each resub checks existing node pairs |
+
+**Why randomized > hardcoded scripts**: Early versions used 8 hardcoded script templates with fixed k and perturbation values per step. This limited the search space — the optimizer could only explore 8 distinct trajectories regardless of restart count. With randomized generation, every restart explores a unique trajectory, and with enough restarts the optimizer finds the specific parameter combinations that work best for a given circuit.
+
+**Why it's off by default**: each restart takes roughly as long as the default pipeline. With `--stochastic 16` on 4 cores, wall time is ~4x the default pipeline. Enable it for high-effort optimization where gate count matters more than runtime.
+
+**Results when enabled** (verified correct): mul4_unsigned 124→**92** (`--stochastic 16`, 4 cores, 208s), mul4_signed 106→103, rand_deep_large 10→7. The algebraic decompression was the key breakthrough for the multiplier — it exposes fundamentally different circuit topologies that the compress passes can exploit.
 
 **Empirical tuning**: The decompress/compress ratio was tuned via systematic experiment (`benchmarks/experiment_decompress.py`). Key findings on the 4-bit unsigned multiplier:
 
 | Decompression | Fraction | Compress steps/cycle | Best gates (verified) |
 |---|---|---|---|
-| algebraic | 0.3 | 3 (5 cycles) | **92** |
+| algebraic | 0.3 | 3 (5-7 cycles) | **92** |
 | algebraic | 0.15 | 3 (4 cycles + bal) | 93 |
 | algebraic | 0.2 | 3 (3 cycles) | 96 |
 | perturb | 0.2-0.5 | 2-5 | 103-104 |
 
-The sweet spot is light algebraic decompression (20% of gates, +25% size increase) followed by 3 compression steps (rewrite with varied k + resub), repeated for 3 cycles. Heavier decompression explores more but takes longer to compress back; lighter decompression doesn't change enough structure. Algebraic rewrite consistently outperforms subgraph perturbation because it creates structurally meaningful changes (redistributing inputs across gates) rather than random ones.
+The sweet spot is light algebraic decompression (20-30% of gates, +25% size increase) followed by 2-3 compression steps (rewrite with varied k + resub), repeated for 5-8 cycles. Heavier decompression explores more but takes longer to compress back; lighter decompression doesn't change enough structure. Algebraic rewrite consistently outperforms subgraph perturbation because it creates structurally meaningful changes (redistributing inputs across gates) rather than random ones.
 
 Note: the aggressive resub bug (creating gates before verification, causing self-referential simulation) has been fixed. Results are now verified via truth-table checking at every step.
 
@@ -223,11 +245,11 @@ python -m aig_opt input.aag -o output.aag --balance --stats
 # Enable multi-output optimization (slower, finds cross-output gate sharing)
 python -m aig_opt input.aag -o output.aag --multioutput --stats
 
-# Stochastic multi-restart (high-effort, N restarts)
-python -m aig_opt input.aag -o output.aag --stochastic 5 --stats
+# Stochastic multi-restart (high-effort, N restarts, auto-parallelized across cores)
+python -m aig_opt input.aag -o output.aag --stochastic 16 --stats
 
 # Combine flags for maximum effort
-python -m aig_opt input.aag -o output.aag --balance --multioutput --stochastic 5 --stats
+python -m aig_opt input.aag -o output.aag --balance --multioutput --stochastic 16 --stats
 
 # Run benchmarks (requires: pip install pyosys)
 python benchmarks/benchmark.py
@@ -293,7 +315,7 @@ In practice, this matters less than expected: the DAG-aware cost model only coun
 
 The optional `--multioutput` pass finds cross-output gate sharing via exhaustive exact synthesis, but it is only tractable for output groups with ≤5 combined inputs. It solves the half_adder (4→3 gates) but cannot help the full_adder (3 inputs but 9 gates requires depth-8 search, too slow in Python) or the multipliers (8 shared inputs per output pair).
 
-**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 default, 92 stochastic vs ABC's 82), mul4_signed (106 default, 103 stochastic vs ABC's 83).
+**Affected circuits**: full_adder (9 vs ABC's 7), mul4_unsigned (104 default, 92 stochastic-16 vs ABC's 82), mul4_signed (106 default, 103 stochastic vs ABC's 83).
 
 **Possible fix**: SAT-based exact synthesis instead of brute-force enumeration, or a C extension for the inner search loop.
 

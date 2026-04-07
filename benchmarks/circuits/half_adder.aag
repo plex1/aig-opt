@@ -1,0 +1,20 @@
+aag 6 2 0 2 4
+2
+4
+11
+12
+6 2 5
+8 3 4
+10 7 9
+12 2 4
+i0 a
+i1 b
+o0 sum
+o1 carry
+c
+Half adder: sum=XOR(a,b), carry=AND(a,b)
+var1=a, var2=b
+var3=a AND !b, var4=!a AND b
+var5=!var3 AND !var4 => !XOR(a,b)
+sum=!var5=lit 11
+var6=a AND b => carry=lit 12

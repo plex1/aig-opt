@@ -1,0 +1,30 @@
+aag 12 3 0 2 9
+2
+4
+6
+19
+25
+8 2 5
+10 3 4
+12 9 11
+14 13 7
+16 12 6
+18 15 17
+20 2 4
+22 13 6
+24 21 23
+i0 a
+i1 b
+i2 cin
+o0 sum
+o1 cout
+c
+Full adder: sum=a XOR b XOR cin, cout=(a AND b) OR (cin AND (a XOR b))
+var4=a AND !b, var5=!a AND b, var6=!var4 AND !var5 => !XOR(a,b)
+axorb = !var6 = lit 13
+var7=axorb AND !cin, var8=!axorb AND cin
+var9=!var7 AND !var8 => !XOR(axorb, cin)
+sum = !var9 = lit 19
+var10=a AND b, var11=cin AND axorb
+var12=!var10 AND !var11 => !(cout)
+cout = !var12 = lit 25

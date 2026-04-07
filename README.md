@@ -13,8 +13,8 @@ See [BENCHMARKS.md](BENCHMARKS.md) for full results. On a suite of 17 circuits, 
 ### Clone and install
 
 ```bash
-git clone https://github.com/plex1/testrepo.git
-cd testrepo
+git clone https://github.com/plex1/aig-opt.git
+cd aig-opt
 ```
 
 **Option A: using uv (recommended)**
